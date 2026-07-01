@@ -1,0 +1,6 @@
+{
+  "name": "Find Correct Premium",
+  "description": "A premium, AI-powered dating app designed to help you find the correct match using profile analysis, icebreaker generation, and safety checks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
