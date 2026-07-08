@@ -18,6 +18,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -53,6 +56,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.window.Dialog
 import com.example.viewmodel.AppNotification
 import com.example.viewmodel.NotificationType
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
+import androidx.compose.ui.platform.LocalContext
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.PickVisualMediaRequest
@@ -151,6 +159,41 @@ fun DatingApp(viewModel: DatingViewModel) {
         val activeMatchId by viewModel.activeMatchId.collectAsStateWithLifecycle()
         val activeGroupId by viewModel.activeGroupId.collectAsStateWithLifecycle()
 
+        val context = LocalContext.current
+        var showStartupPermissions by remember { mutableStateOf(false) }
+
+        LaunchedEffect(Unit) {
+            val prefs = context.getSharedPreferences("dating_app_prefs", Context.MODE_PRIVATE)
+            val hasAskedStartupPermissions = prefs.getBoolean("has_asked_startup_permissions", false)
+            
+            if (!hasAskedStartupPermissions) {
+                val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                val hasLocation = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                val hasMic = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                val hasContacts = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+                
+                val hasPhotos = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+                } else {
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                }
+
+                val hasNotifications = if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+                } else {
+                    true
+                }
+
+                if (!hasCamera || !hasLocation || !hasMic || !hasPhotos || !hasNotifications || !hasContacts) {
+                    showStartupPermissions = true
+                }
+                
+                // Mark as asked so we never prompt again at startup
+                prefs.edit().putBoolean("has_asked_startup_permissions", true).apply()
+            }
+        }
+
         // Route controller based on user profile state
         LaunchedEffect(userProfile) {
             if (userProfile == null) {
@@ -184,7 +227,7 @@ fun DatingApp(viewModel: DatingViewModel) {
                         viewModel = viewModel,
                         onSignUpSuccess = { activeScreen = "deck" }
                     )
-                    "deck", "reels", "recommendations", "chats", "settings", "premium" -> MainHub(
+                    "deck", "reels", "recommendations", "chats", "settings" -> MainHub(
                         activeTab = screen,
                         viewModel = viewModel,
                         onTabSelected = { activeScreen = it },
@@ -223,6 +266,13 @@ fun DatingApp(viewModel: DatingViewModel) {
         // Lock screen overlay blocks app
         if (isAppLocked) {
             PinLockOverlay(viewModel = viewModel)
+        }
+
+        if (showStartupPermissions) {
+            StartupPermissionsRequestDialog(
+                onDismiss = { showStartupPermissions = false },
+                viewModel = viewModel
+            )
         }
 
         // Floating In-App Match Splash Overlay
@@ -292,7 +342,7 @@ fun DatingApp(viewModel: DatingViewModel) {
         }
 
         // Customer Support Floating Assistive Bubble
-        val isHubScreen = activeScreen in listOf("deck", "recommendations", "chats", "settings", "premium")
+        val isHubScreen = activeScreen in listOf("deck", "recommendations", "chats", "settings")
         if (isHubScreen && !isAppLocked) {
             Box(
                 modifier = Modifier
@@ -1112,19 +1162,7 @@ fun MainHub(
                         unselectedTextColor = Color.Gray
                     )
                 )
-                NavigationBarItem(
-                    selected = activeTab == "premium",
-                    onClick = { onTabSelected("premium") },
-                    icon = { Icon(Icons.Default.Star, contentDescription = "Premium Hub") },
-                    label = { Text("Premium") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = Color(0xFFFFD700), // Gold for premium!
-                        selectedTextColor = Color(0xFFFFD700),
-                        indicatorColor = NavyDark,
-                        unselectedIconColor = Color.Gray,
-                        unselectedTextColor = Color.Gray
-                    )
-                )
+
                 NavigationBarItem(
                     selected = activeTab == "chats",
                     onClick = { onTabSelected("chats") },
@@ -1169,8 +1207,7 @@ fun MainHub(
                 "reels" -> ReelsScreen(viewModel, onNavigateToChat)
                 "recommendations" -> AIRecommendationsScreen(viewModel, onNavigateToChat)
                 "chats" -> ChatsListScreen(viewModel, onNavigateToChat, onNavigateToGroupChat)
-                "premium" -> PremiumFutureHubScreen(viewModel, onNavigateToChat)
-                "settings" -> SystemAdminScreen(viewModel, onOpenSupport)
+                "settings" -> SystemAdminScreen(viewModel, onOpenSupport, onNavigateToChat)
             }
 
             // Floating Notification Bell Button with badge (Accessible on all tabs!)
@@ -2400,11 +2437,54 @@ fun PremiumFutureHubScreen(viewModel: DatingViewModel, onNavigateToChat: (Int) -
 fun SwipeDeckScreen(viewModel: DatingViewModel) {
     val profiles by viewModel.otherProfiles.collectAsStateWithLifecycle()
     val currentIndex by viewModel.currentSwipeIndex.collectAsStateWithLifecycle()
+    val userProfile by viewModel.userProfile.collectAsStateWithLifecycle()
+    val searchRadius by viewModel.searchRadiusKm.collectAsStateWithLifecycle()
+    val minAge by viewModel.minAgePreference.collectAsStateWithLifecycle()
+    val maxAge by viewModel.maxAgePreference.collectAsStateWithLifecycle()
+
+    // 1. Interactive Vibe Filters local states
+    var selectedMoodFilter by remember { mutableStateOf("All") }
+    var selectedGoalFilter by remember { mutableStateOf("All") }
+    var activeSubMode by remember { mutableStateOf("deck") } // "deck" or "feed"
+
+    val filteredProfiles = remember(profiles, selectedMoodFilter, selectedGoalFilter, searchRadius, minAge, maxAge, userProfile) {
+        profiles.filter { profile ->
+            val matchMood = selectedMoodFilter == "All" || profile.moodBadge == selectedMoodFilter
+            val matchGoal = selectedGoalFilter == "All" || profile.datingGoal == selectedGoalFilter
+            
+            // Preference checks
+            val distance = viewModel.getDistanceToProfile(profile)
+            val matchDistance = distance <= searchRadius
+            val matchAge = profile.age in minAge..maxAge
+            
+            // Gender matching
+            val userGender = userProfile?.gender ?: "Male"
+            val matchGender = when (userProfile?.interestedIn) {
+                "Male" -> profile.gender == "Male"
+                "Female" -> profile.gender == "Female"
+                else -> true // Everyone
+            }
+            val matchMutualGender = when (profile.interestedIn) {
+                "Male" -> userGender == "Male"
+                "Female" -> userGender == "Female"
+                else -> true
+            }
+            
+            matchMood && matchGoal && matchDistance && matchAge && matchGender && matchMutualGender
+        }
+    }
+
+    var filteredIndex by remember(filteredProfiles.size) { mutableStateOf(0) }
+    val safeFilteredIndex = if (filteredProfiles.isNotEmpty()) {
+        if (filteredIndex < filteredProfiles.size) filteredIndex else 0
+    } else {
+        0
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
@@ -2440,15 +2520,181 @@ fun SwipeDeckScreen(viewModel: DatingViewModel) {
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(6.dp))
+
+        // High-Fidelity Segmented Tab Toggle between Classic Swipe and Instagram-style Social Feed
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(NavyDark, RoundedCornerShape(14.dp))
+                .border(1.dp, NavyLight, RoundedCornerShape(14.dp))
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (activeSubMode == "deck") TealVibrant else Color.Transparent)
+                    .clickable { activeSubMode = "deck" }
+                    .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("🔥", fontSize = 12.sp)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Swipe Deck",
+                        color = if (activeSubMode == "deck") Color.White else Color.Gray,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (activeSubMode == "feed") TealVibrant else Color.Transparent)
+                    .clickable { activeSubMode = "feed" }
+                    .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("📱", fontSize = 12.sp)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Social Feed",
+                        color = if (activeSubMode == "feed") Color.White else Color.Gray,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        if (activeSubMode == "feed") {
+            Box(modifier = Modifier.weight(1f)) {
+                SocialFeedScreen(viewModel = viewModel)
+            }
+        } else {
+            // Vibe Filters Row (Decisions: Mood Alignment)
+        LazyRow(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val moods = listOf("All", "☕ Cafe Chat", "🍷 Wine Date", "🍿 Movie Night", "🏔️ Outdoorsy", "🎮 Gaming Duo")
+            items(moods) { mood ->
+                val isSelected = selectedMoodFilter == mood
+                val bgModifier = if (isSelected) {
+                    Modifier.background(Brush.linearGradient(listOf(Color(0xFFE040FB), Color(0xFF00E5FF))))
+                } else {
+                    Modifier.background(NavyLight.copy(alpha = 0.6f))
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .then(bgModifier)
+                        .clickable { selectedMoodFilter = mood; filteredIndex = 0 }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (mood == "All") "✨ All Vibes" else mood,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+            }
+        }
+
+        // Dating Goal Filters Row (Decisions: Goal Alignment)
+        LazyRow(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val goals = listOf("All", "💍 Serious Match", "🥂 Casual Fun", "✨ Just Friends", "🧩 Chat & See")
+            items(goals) { goal ->
+                val isSelected = selectedGoalFilter == goal
+                val bgModifier = if (isSelected) {
+                    Modifier.background(Brush.linearGradient(listOf(Color(0xFFFF5722), Color(0xFFFFC107))))
+                } else {
+                    Modifier.background(NavyLight.copy(alpha = 0.6f))
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .then(bgModifier)
+                        .clickable { selectedGoalFilter = goal; filteredIndex = 0 }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = if (goal == "All") "🎯 All Goals" else goal,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         if (profiles.isEmpty()) {
             Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = TealVibrant)
             }
+        } else if (filteredProfiles.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(12.dp)
+                    .background(DarkSurface, RoundedCornerShape(24.dp))
+                    .border(1.dp, NavyLight, RoundedCornerShape(24.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(20.dp)
+                ) {
+                    Text("🔮", fontSize = 44.sp)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "No vibe matches found",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Try clearing your filters to see more profiles!",
+                        color = Color.Gray,
+                        fontSize = 11.sp,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Button(
+                        onClick = {
+                            selectedMoodFilter = "All"
+                            selectedGoalFilter = "All"
+                            filteredIndex = 0
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = TealVibrant)
+                    ) {
+                        Text("Reset Vibe Filters", color = Color.White, fontSize = 11.sp)
+                    }
+                }
+            }
         } else {
-            val safeIndex = if (currentIndex < profiles.size) currentIndex else 0
-            val profile = profiles[safeIndex]
+            val profile = filteredProfiles[safeFilteredIndex]
 
             // Prefetch compatibility calculation early for fluid rendering
             LaunchedEffect(profile) {
@@ -2464,66 +2710,168 @@ fun SwipeDeckScreen(viewModel: DatingViewModel) {
                 ProfileCard(
                     profile = profile,
                     viewModel = viewModel,
-                    onLeftSwipe = { viewModel.swipeLeft() },
-                    onRightSwipe = { viewModel.swipeRight(profile) }
+                    onLeftSwipe = {
+                        filteredIndex = (filteredIndex + 1) % filteredProfiles.size
+                    },
+                    onRightSwipe = {
+                        viewModel.swipeRight(profile)
+                        filteredIndex = (filteredIndex + 1) % filteredProfiles.size
+                    }
                 )
             }
         }
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // Actions Bottom Buttons
+        // 5-Button Decision Deck (Rewind, Pass, Boost Match, SuperLike, Like)
         if (profiles.isNotEmpty()) {
-            val safeIndex = if (currentIndex < profiles.size) currentIndex else 0
-            val currentProfile = profiles[safeIndex]
-
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Pass button
-                IconButton(
-                    onClick = { viewModel.swipeLeft() },
-                    modifier = Modifier
-                        .size(54.dp)
-                        .shadow(4.dp, CircleShape)
-                        .background(DarkSurface, CircleShape)
-                        .border(1.dp, Color.Red.copy(alpha = 0.5f), CircleShape)
-                        .testTag("pass_button")
-                ) {
-                    Icon(Icons.Default.Close, contentDescription = "Pass Profile", tint = Color.Red, modifier = Modifier.size(28.dp))
-                }
-
-                // SuperLike / Compatibility Info
+                // 1. Rewind/Undo (Yellow)
                 IconButton(
                     onClick = {
-                        // Triggers custom fast matching and confetti particle shower!
-                        viewModel.triggerSuperLikeConfetti()
-                        viewModel.swipeRight(currentProfile)
+                        if (filteredProfiles.isNotEmpty()) {
+                            filteredIndex = if (filteredIndex - 1 < 0) filteredProfiles.size - 1 else filteredIndex - 1
+                        } else {
+                            viewModel.undoSwipe()
+                        }
                     },
                     modifier = Modifier
-                        .size(46.dp)
-                        .shadow(4.dp, CircleShape)
+                        .size(44.dp)
+                        .shadow(2.dp, CircleShape)
                         .background(DarkSurface, CircleShape)
-                        .border(1.dp, TealAccent.copy(alpha = 0.5f), CircleShape)
-                        .testTag("superlike_button")
+                        .border(1.dp, Color(0xFFFFD54F).copy(alpha = 0.6f), CircleShape)
+                        .testTag("rewind_button")
                 ) {
-                    Icon(Icons.Default.Star, contentDescription = "Super Like", tint = TealAccent, modifier = Modifier.size(24.dp))
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Rewind Swipe",
+                        tint = Color(0xFFFFD54F),
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
 
-                // Like button
+                // 2. Pass button (Red)
                 IconButton(
-                    onClick = { viewModel.swipeRight(currentProfile) },
+                    onClick = {
+                        if (filteredProfiles.isNotEmpty()) {
+                            filteredIndex = (filteredIndex + 1) % filteredProfiles.size
+                        } else {
+                            viewModel.swipeLeft()
+                        }
+                    },
                     modifier = Modifier
-                        .size(54.dp)
+                        .size(52.dp)
+                        .shadow(4.dp, CircleShape)
+                        .background(DarkSurface, CircleShape)
+                        .border(1.5.dp, Color.Red.copy(alpha = 0.6f), CircleShape)
+                        .testTag("pass_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Pass Profile",
+                        tint = Color.Red,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+
+                // 3. Instant Boost Match (Purple Gradient ⚡)
+                IconButton(
+                    onClick = {
+                        val currentProfile = if (filteredProfiles.isNotEmpty()) {
+                            filteredProfiles[safeFilteredIndex]
+                        } else {
+                            val safeIndex = if (currentIndex < profiles.size) currentIndex else 0
+                            profiles[safeIndex]
+                        }
+                        viewModel.triggerSuperLikeConfetti()
+                        viewModel.instantMatch(currentProfile)
+                        if (filteredProfiles.isNotEmpty()) {
+                            filteredIndex = (filteredIndex + 1) % filteredProfiles.size
+                        }
+                    },
+                    modifier = Modifier
+                        .size(58.dp)
+                        .shadow(6.dp, CircleShape)
+                        .background(
+                            Brush.linearGradient(
+                                listOf(Color(0xFFE040FB), Color(0xFF651FFF))
+                            ),
+                            CircleShape
+                        )
+                        .testTag("boost_button")
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "⚡",
+                            fontSize = 24.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // 4. SuperLike / Compatibility Info (Teal/Blue)
+                IconButton(
+                    onClick = {
+                        val currentProfile = if (filteredProfiles.isNotEmpty()) {
+                            filteredProfiles[safeFilteredIndex]
+                        } else {
+                            val safeIndex = if (currentIndex < profiles.size) currentIndex else 0
+                            profiles[safeIndex]
+                        }
+                        viewModel.triggerSuperLikeConfetti()
+                        viewModel.swipeRight(currentProfile)
+                        if (filteredProfiles.isNotEmpty()) {
+                            filteredIndex = (filteredIndex + 1) % filteredProfiles.size
+                        }
+                    },
+                    modifier = Modifier
+                        .size(44.dp)
+                        .shadow(2.dp, CircleShape)
+                        .background(DarkSurface, CircleShape)
+                        .border(1.dp, TealAccent.copy(alpha = 0.6f), CircleShape)
+                        .testTag("superlike_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Star,
+                        contentDescription = "Super Like",
+                        tint = TealAccent,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                // 5. Like button (Vibrant Green)
+                IconButton(
+                    onClick = {
+                        val currentProfile = if (filteredProfiles.isNotEmpty()) {
+                            filteredProfiles[safeFilteredIndex]
+                        } else {
+                            val safeIndex = if (currentIndex < profiles.size) currentIndex else 0
+                            profiles[safeIndex]
+                        }
+                        viewModel.swipeRight(currentProfile)
+                        if (filteredProfiles.isNotEmpty()) {
+                            filteredIndex = (filteredIndex + 1) % filteredProfiles.size
+                        }
+                    },
+                    modifier = Modifier
+                        .size(52.dp)
                         .shadow(4.dp, CircleShape)
                         .background(TealVibrant, CircleShape)
                         .testTag("like_button")
                 ) {
-                    Icon(Icons.Default.Favorite, contentDescription = "Like Profile", tint = Color.White, modifier = Modifier.size(28.dp))
+                    Icon(
+                        imageVector = Icons.Default.Favorite,
+                        contentDescription = "Like Profile",
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp)
+                    )
                 }
             }
+        }
         }
     }
 }
@@ -2699,27 +3047,7 @@ fun ProfileCard(
                         .padding(bottom = 12.dp, start = 12.dp, end = 12.dp)
                 ) {
                     // Verified / Safe Badge
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (profile.isVerified) Icons.Default.CheckCircle else Icons.Default.Warning,
-                            contentDescription = "Status",
-                            tint = if (profile.isVerified) TealAccent else Color.Red,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (profile.isVerified) "VERIFIED" else "UNVERIFIED",
-                            color = if (profile.isVerified) TealAccent else Color.Red,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.5.sp
-                        )
-                    }
+                    VerifiedBadge(profile = profile)
 
                     // FC Trust Score Ring
                     Row(
@@ -2790,7 +3118,7 @@ fun ProfileCard(
                         )
                         if (profile.isVerified) {
                             Spacer(modifier = Modifier.width(6.dp))
-                            Icon(Icons.Default.CheckCircle, contentDescription = "Verified Badge", tint = TealAccent, modifier = Modifier.size(20.dp))
+                            VerifiedBadge(profile = profile, showText = false, iconSize = 20.dp)
                         }
                     }
 
@@ -2849,6 +3177,138 @@ fun ProfileCard(
                     overflow = TextOverflow.Ellipsis
                 )
 
+                // --- NEW: Feed Interactions Bar (Like, Comment, Share, Bookmark) ---
+                var isCardLiked by remember(profile.id) { mutableStateOf(false) }
+                var cardLikesCount by remember(profile.id) { mutableIntStateOf(profile.trustScore + 42) }
+                var showCardComments by remember { mutableStateOf(false) }
+                var showCardShareMenu by remember { mutableStateOf(false) }
+                var isBookmarked by remember(profile.id) { mutableStateOf(false) }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 1. Like Option
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                isCardLiked = !isCardLiked
+                                if (isCardLiked) {
+                                    cardLikesCount++
+                                    viewModel.triggerConfetti()
+                                    viewModel.showNotification("💖 Liked ${profile.name}'s feed post!")
+                                } else {
+                                    cardLikesCount--
+                                }
+                            }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (isCardLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = "Like Feed",
+                            tint = if (isCardLiked) Color.Red else Color.LightGray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "$cardLikesCount",
+                            color = Color.LightGray,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // 2. Comment Option
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { showCardComments = true }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Comment,
+                            contentDescription = "Comment Feed",
+                            tint = Color.LightGray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "15",
+                            color = Color.LightGray,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // 3. Share Option
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { showCardShareMenu = true }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Share,
+                            contentDescription = "Share Feed",
+                            tint = Color.LightGray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Share",
+                            color = Color.LightGray,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // 4. Save/Bookmark (The "one more" option!)
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                isBookmarked = !isBookmarked
+                                if (isBookmarked) {
+                                    viewModel.showNotification("🔖 Added ${profile.name} to your Bookmark Feed list!")
+                                } else {
+                                    viewModel.showNotification("Removed ${profile.name} from bookmarks.")
+                                }
+                            }
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                            contentDescription = "Save Feed",
+                            tint = if (isBookmarked) TealAccent else Color.LightGray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Save",
+                            color = Color.LightGray,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // Interactive Overlays
+                if (showCardComments) {
+                    CommentsDialog(profile = profile, onDismiss = { showCardComments = false })
+                }
+
+                if (showCardShareMenu) {
+                    ProfileCardShareDialog(profile = profile, viewModel = viewModel, onDismiss = { showCardShareMenu = false })
+                }
+
                 // Gemini AI Match recommendations on Card
                 if (compatibilityInfo != null) {
                     Divider(color = NavyLight.copy(alpha = 0.4f), thickness = 1.dp)
@@ -2893,6 +3353,1060 @@ fun ProfileCard(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun ProfileCardShareDialog(profile: Profile, viewModel: DatingViewModel, onDismiss: () -> Unit) {
+    val matches by viewModel.matches.collectAsStateWithLifecycle()
+    val profiles by viewModel.otherProfiles.collectAsStateWithLifecycle()
+    val groupChats by viewModel.groupChats.collectAsStateWithLifecycle()
+    
+    val friends = remember(matches, profiles) {
+        matches.mapNotNull { match ->
+            profiles.find { it.id == match.matchedUserId || it.id == match.userId }?.takeIf { it.id != profile.id }
+        }.distinctBy { it.id }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Share ${profile.name}'s Profile",
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                fontSize = 18.sp
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "Recommend ${profile.name} to your friends and matched connections:",
+                    color = Color.Gray,
+                    fontSize = 12.sp
+                )
+                
+                Text("Your Matches", color = TealAccent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                if (friends.isEmpty()) {
+                    Text("No matched connections yet. Match first to share!", color = Color.DarkGray, fontSize = 11.sp)
+                } else {
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        items(friends) { friend ->
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier
+                                    .clickable {
+                                        viewModel.showNotification("🔗 Shared ${profile.name}'s profile with ${friend.name}!")
+                                        onDismiss()
+                                    }
+                                    .padding(4.dp)
+                                    .width(64.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(CircleShape)
+                                        .background(AvatarGradients[friend.avatarGradientIndex % AvatarGradients.size]),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(friend.avatarEmoji, fontSize = 24.sp)
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = friend.name,
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(4.dp))
+                Text("Message Groups", color = TealAccent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                if (groupChats.isEmpty()) {
+                    Text("No message groups active.", color = Color.DarkGray, fontSize = 11.sp)
+                } else {
+                    LazyRow(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        items(groupChats) { group ->
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier
+                                    .clickable {
+                                        viewModel.showNotification("🔗 Shared ${profile.name}'s profile in group: ${group.name}!")
+                                        onDismiss()
+                                    }
+                                    .padding(4.dp)
+                                    .width(64.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(CircleShape)
+                                        .background(AvatarGradients[group.avatarGradientIndex % AvatarGradients.size]),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(group.avatarEmoji, fontSize = 24.sp)
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = group.name,
+                                    color = Color.White,
+                                    fontSize = 10.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = Color.Gray, fontWeight = FontWeight.Bold)
+            }
+        },
+        containerColor = DarkSurface,
+        shape = RoundedCornerShape(16.dp)
+    )
+}
+
+// --- INSTAGRAM-STYLE SOCIAL FEED DATA CLASS & SCREENS ---
+
+data class SocialPost(
+    val id: String,
+    val profile: Profile,
+    val timeAgo: String,
+    val location: String,
+    val images: List<String>,
+    val caption: String,
+    val isLiked: Boolean,
+    val likesCount: Int,
+    val isBookmarked: Boolean,
+    val comments: List<Triple<String, String, String>> // Author, text, emoji
+)
+
+@Composable
+fun SocialFeedScreen(viewModel: DatingViewModel) {
+    val profiles by viewModel.otherProfiles.collectAsStateWithLifecycle()
+    var isRefreshing by remember { mutableStateOf(false) }
+    var isLoadingMore by remember { mutableStateOf(false) }
+
+    val coroutineScope = rememberCoroutineScope()
+
+    // Create persistent social posts state mapped from dynamic profiles list
+    val postsState = remember(profiles) {
+        val initialPosts = mutableListOf<SocialPost>()
+        profiles.forEachIndexed { index, profile ->
+            initialPosts.add(
+                SocialPost(
+                    id = "post_${profile.id}",
+                    profile = profile,
+                    timeAgo = when (index % 4) {
+                        0 -> "Just now"
+                        1 -> "2 hours ago"
+                        2 -> "5 hours ago"
+                        else -> "1 day ago"
+                    },
+                    location = profile.location,
+                    images = listOf(profile.image1, profile.image2, profile.image3).filter { it.isNotBlank() },
+                    caption = when (index % 5) {
+                        0 -> "Sunday brunch vibes! Sunday is for coffee, laughs, and searching for that perfect vibe connection. 🥞☕✨"
+                        1 -> "Conquered the mountain trail today! Nothing beats fresh air, panoramic peaks, and zero compromises. 🌲⛰️ Let's hit the outdoors!"
+                        2 -> "Exhibition walk. Art captures what words fail to say. Let's debate modern design over some premium gelato! 🎨🍕"
+                        3 -> "Pottery studio session today. Crafting clay teaches you focus, patience, and how to embrace beautiful imperfections. 🏺🧩"
+                        else -> "Rainy Friday gaming setup. Cozy blankets, vintage audio synth, and premium woodfired pizza. 🎮🍕 Who's my co-op player?"
+                    },
+                    isLiked = index % 3 == 0,
+                    likesCount = profile.trustScore * 2 + 15,
+                    isBookmarked = false,
+                    comments = listOf(
+                        Triple("Mia_VibeCoach", "This photo has amazing natural lighting! Huge green flag! 💚", "👩‍💼"),
+                        Triple("Aiden_Check", "Love the absolute design aesthetic here! Visual masterpiece.", "🔥")
+                    )
+                )
+            )
+        }
+        initialPosts
+    }
+
+    // Dynamic state list containing both original and infinitely loaded extra posts
+    val postsList = remember(postsState) {
+        mutableStateListOf<SocialPost>().apply { addAll(postsState) }
+    }
+
+    // Helper to generate dynamic, authentic random extra posts endlessly
+    fun generateRandomExtraPost(index: Int): SocialPost {
+        val randomNames = listOf("Sophia", "Liam", "Olivia", "Noah", "Emma", "Jackson", "Ava", "Lucas", "Isabella", "Oliver", "Maya", "Ethan", "Zoe")
+        val randomEmojis = listOf("✨", "🌟", "🌸", "🎨", "🍵", "⛰️", "🎸", "🎧", "🍕", "🐶", "🐱", "🥂", "✈️", "🌿", "📷")
+        val randomLocations = listOf("Downtown Lounge", "Sunset Cliffs", "Metropolitan Museum", "Botanical Garden", "The Roastery Coffee", "Summit View Trail", "Cozy Corner Bakery", "Art District Loft")
+        val randomCaptions = listOf(
+            "Catching golden hour! Let's find some good music and discuss philosophy over dynamic views. 🌅🎧",
+            "Weekend getaway. Unplugging from the tech world, connecting with real, raw nature vibes. 🌲💚",
+            "Exploring local record stores today. Vinyl hits different. What's your favorite track of all time? 🎵📻",
+            "Tasting the best sourdough pizza in town. Good food is meant to be shared! 🍕✨ Let's plan a foodie date.",
+            "Just a quiet morning with my favorite journal and a pour-over coffee. Intentional living wins every single time. ☕🌿",
+            "Late-night programming playlist and dynamic ambient lights. Cyberpunk aesthetic complete. 🌌💻",
+            "Self-care afternoon. Face masks, peaceful lofi music, and a warm cup of matcha latte. 🍵✨ Remember to slow down!",
+            "Strolling through the botanical gardens. Nature has this beautiful way of reminding us that growth takes time. 🌺🌿"
+        )
+        val randomImages = listOf(
+            "https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=800&q=80",
+            "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?auto=format&fit=crop&w=800&q=80",
+            "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=800&q=80",
+            "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=800&q=80",
+            "https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=800&q=80",
+            "https://images.unsplash.com/photo-1501196354995-cbb51c65aaea?auto=format&fit=crop&w=800&q=80",
+            "https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?auto=format&fit=crop&w=800&q=80"
+        )
+        
+        val name = randomNames[index % randomNames.size]
+        val emoji = randomEmojis[index % randomEmojis.size]
+        val gradIdx = index % 6
+        val loc = randomLocations[index % randomLocations.size]
+        val caption = randomCaptions[index % randomCaptions.size]
+        val image = randomImages[index % randomImages.size]
+        
+        val customProfile = Profile(
+            id = 1000 + index,
+            name = name,
+            age = 21 + (index % 10),
+            bio = "Exploring the beauty of authentic connections.",
+            gender = "Everyone",
+            interestedIn = "Everyone",
+            location = loc,
+            interests = "Music, Art, Travel",
+            avatarGradientIndex = gradIdx,
+            avatarEmoji = emoji,
+            isVerified = true,
+            trustScore = 80 + (index % 21),
+            moodBadge = "✨ Cosmic Slider",
+            datingGoal = "✨ Open to Options",
+            image1 = image
+        )
+        
+        return SocialPost(
+            id = "extra_post_$index",
+            profile = customProfile,
+            timeAgo = "${(index % 5) + 1} hours ago",
+            location = loc,
+            images = listOf(image),
+            caption = caption,
+            isLiked = index % 2 == 0,
+            likesCount = 45 + (index * 12) % 300,
+            isBookmarked = false,
+            comments = listOf(
+                Triple("VibeExplorer", "This looks incredibly cozy! Count me in. 🥂", "✨"),
+                Triple("DynamicPioneer", "The composition of this photo is elite.", "🎨")
+            )
+        )
+    }
+
+    val listState = rememberLazyListState()
+
+    // Derived state to check if we are scrolling near the bottom (triggers continuous load)
+    val shouldLoadMore = remember {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val visibleItemsInfo = layoutInfo.visibleItemsInfo
+            if (layoutInfo.totalItemsCount == 0) {
+                false
+            } else {
+                val lastVisibleItem = visibleItemsInfo.lastOrNull()
+                lastVisibleItem != null && lastVisibleItem.index >= layoutInfo.totalItemsCount - 2
+            }
+        }
+    }
+
+    // Effect to continuously load more entries endlessly
+    LaunchedEffect(shouldLoadMore.value) {
+        if (shouldLoadMore.value && !isLoadingMore && !isRefreshing) {
+            isLoadingMore = true
+            delay(1000) // Beautiful delay simulating visual skeleton loading
+            val currentSize = postsList.size
+            for (i in 0 until 3) {
+                postsList.add(generateRandomExtraPost(currentSize + i))
+            }
+            isLoadingMore = false
+        }
+    }
+
+    var selectedStoryProfile by remember { mutableStateOf<Profile?>(null) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Stories tray at the very top
+            StoriesTray(
+                profiles = profiles,
+                onStoryClick = { selectedStoryProfile = it }
+            )
+
+            Divider(color = NavyLight.copy(alpha = 0.5f), thickness = 1.dp)
+
+            if (isRefreshing) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(60.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = TealVibrant, modifier = Modifier.size(24.dp))
+                }
+            }
+
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+                contentPadding = PaddingValues(bottom = 80.dp)
+            ) {
+                items(postsList, key = { it.id }) { post ->
+                    InstagramPostCard(
+                        post = post,
+                        viewModel = viewModel
+                    )
+                }
+
+                if (isLoadingMore) {
+                    item {
+                        PostCardSkeleton()
+                    }
+                }
+            }
+        }
+
+        // Pull to refresh simulation floating button
+        FloatingActionButton(
+            onClick = {
+                coroutineScope.launch {
+                    isRefreshing = true
+                    viewModel.showNotification("🔄 Refreshing social feed posts...")
+                    delay(1200)
+                    postsList.clear()
+                    postsList.addAll(postsState)
+                    isRefreshing = false
+                    viewModel.showNotification("✨ Feed updated successfully!")
+                }
+            },
+            containerColor = TealVibrant,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(bottom = 16.dp, end = 16.dp)
+                .size(46.dp)
+        ) {
+            Icon(Icons.Default.Refresh, contentDescription = "Refresh Feed", tint = Color.White)
+        }
+
+        // Full Screen Story viewer dialog
+        selectedStoryProfile?.let { storyProfile ->
+            StoryViewerDialog(
+                profile = storyProfile,
+                onDismiss = { selectedStoryProfile = null },
+                viewModel = viewModel
+            )
+        }
+    }
+}
+
+@Composable
+fun StoriesTray(profiles: List<Profile>, onStoryClick: (Profile) -> Unit) {
+    LazyRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(DarkBackground)
+            .padding(vertical = 12.dp, horizontal = 14.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        item {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.clickable { }
+            ) {
+                Box(
+                    modifier = Modifier.size(62.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(NavyLight),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("👋", fontSize = 32.sp)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .align(Alignment.BottomEnd)
+                            .clip(CircleShape)
+                            .background(TealVibrant)
+                            .border(2.dp, DarkBackground, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "Add story",
+                            tint = Color.White,
+                            modifier = Modifier.size(12.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text("Your Story", color = Color.Gray, fontSize = 10.sp)
+            }
+        }
+
+        items(profiles) { profile ->
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .clickable { onStoryClick(profile) }
+                    .testTag("story_item_${profile.id}")
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(62.dp)
+                        .border(
+                            width = 2.dp,
+                            brush = Brush.sweepGradient(
+                                colors = listOf(Color(0xFFFF3D00), Color(0xFFFF007F), Color(0xFFE040FB), Color(0xFF00E5FF), Color(0xFFFF3D00))
+                            ),
+                            shape = CircleShape
+                        )
+                        .padding(3.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
+                            .background(AvatarGradients[profile.avatarGradientIndex % AvatarGradients.size]),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(profile.avatarEmoji, fontSize = 30.sp)
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = profile.name,
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.width(62.dp),
+                    textAlign = TextAlign.Center
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun StoryViewerDialog(profile: Profile, onDismiss: () -> Unit, viewModel: DatingViewModel) {
+    var progress by remember { mutableStateOf(0f) }
+    var paused by remember { mutableStateOf(false) }
+
+    LaunchedEffect(paused) {
+        if (!paused) {
+            while (progress < 1.0f) {
+                delay(100)
+                progress += 0.02f
+            }
+            onDismiss()
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            AsyncImage(
+                model = profile.image1.ifEmpty { "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=800&q=80" },
+                contentDescription = "${profile.name} story image",
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable { paused = !paused },
+                contentScale = ContentScale.Crop
+            )
+
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Black.copy(alpha = 0.6f),
+                                Color.Transparent,
+                                Color.Black.copy(alpha = 0.7f)
+                            )
+                        )
+                    )
+            )
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .padding(horizontal = 16.dp, vertical = 20.dp)
+            ) {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = TealAccent,
+                    trackColor = Color.White.copy(alpha = 0.3f),
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(AvatarGradients[profile.avatarGradientIndex % AvatarGradients.size]),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(profile.avatarEmoji, fontSize = 22.sp)
+                    }
+
+                    Spacer(modifier = Modifier.width(10.dp))
+
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = profile.name,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp
+                            )
+                            if (profile.isVerified) {
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "Verified profile",
+                                    tint = TealVibrant,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Active 2h ago • ${profile.location}",
+                            color = Color.LightGray,
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close Story", tint = Color.White)
+                    }
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    val emojis = listOf("❤️", "🔥", "😂", "😮", "😢", "👏")
+                    emojis.forEach { emoji ->
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.15f))
+                                .clickable {
+                                    viewModel.triggerConfetti()
+                                    viewModel.showNotification("Sent $emoji reaction to ${profile.name}'s story!")
+                                    onDismiss()
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(emoji, fontSize = 22.sp)
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    var replyText by remember { mutableStateOf("") }
+                    OutlinedTextField(
+                        value = replyText,
+                        onValueChange = { replyText = it },
+                        placeholder = { Text("Send quick reply...", color = Color.LightGray, fontSize = 12.sp) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = TealAccent,
+                            unfocusedBorderColor = Color.Gray,
+                            focusedContainerColor = Color.White.copy(alpha = 0.1f),
+                            unfocusedContainerColor = Color.White.copy(alpha = 0.1f)
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp),
+                        shape = RoundedCornerShape(24.dp)
+                    )
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    IconButton(
+                        onClick = {
+                            if (replyText.isNotBlank()) {
+                                viewModel.showNotification("Sent reply to ${profile.name}: \"$replyText\"")
+                                onDismiss()
+                            }
+                        },
+                        modifier = Modifier
+                            .size(44.dp)
+                            .background(TealVibrant, CircleShape)
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = Color.White, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun InstagramPostCard(post: SocialPost, viewModel: DatingViewModel) {
+    var isLiked by remember(post.id) { mutableStateOf(post.isLiked) }
+    var likesCount by remember(post.id) { mutableIntStateOf(post.likesCount) }
+    var isBookmarked by remember(post.id) { mutableStateOf(post.isBookmarked) }
+
+    val localComments = remember(post.id) { mutableStateListOf<Triple<String, String, String>>().apply { addAll(post.comments) } }
+    var commentText by remember { mutableStateOf("") }
+
+    var showHeartPop by remember { mutableStateOf(false) }
+    var showShareMenu by remember { mutableStateOf(false) }
+    var showOptionsDialog by remember { mutableStateOf(false) }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(0.5.dp, NavyLight, RoundedCornerShape(16.dp))
+            .testTag("post_card_${post.id}")
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(AvatarGradients[post.profile.avatarGradientIndex % AvatarGradients.size]),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(post.profile.avatarEmoji, fontSize = 22.sp)
+                }
+
+                Spacer(modifier = Modifier.width(10.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = post.profile.name,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "${post.profile.age}",
+                            color = Color.LightGray,
+                            fontSize = 13.sp
+                        )
+                        if (post.profile.isVerified) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            VerifiedBadge(profile = post.profile, showText = false, iconSize = 14.dp)
+                        }
+                    }
+                    Text(
+                        text = "${post.location} • ${post.timeAgo}",
+                        color = Color.Gray,
+                        fontSize = 11.sp
+                    )
+                }
+
+                IconButton(onClick = { showOptionsDialog = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "Options", tint = Color.Gray)
+                }
+            }
+
+            val photos = post.images
+            var currentPhotoIndex by remember { mutableIntStateOf(0) }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(300.dp)
+                    .background(Color.Black)
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                if (!isLiked) {
+                                    isLiked = true
+                                    likesCount++
+                                }
+                                showHeartPop = true
+                                viewModel.triggerConfetti()
+                                viewModel.showNotification("💖 Double tap Liked ${post.profile.name}'s post!")
+                            },
+                            onTap = {
+                                if (photos.isNotEmpty()) {
+                                    currentPhotoIndex = (currentPhotoIndex + 1) % photos.size
+                                }
+                            }
+                        )
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                if (photos.isNotEmpty()) {
+                    AsyncImage(
+                        model = photos[currentPhotoIndex],
+                        contentDescription = "Post image index $currentPhotoIndex",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+
+                    if (photos.size > 1) {
+                        Row(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(12.dp)
+                                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = "${currentPhotoIndex + 1}/${photos.size}",
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(NavyDark),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("📷 Visual feed processing...", color = Color.Gray, fontSize = 12.sp)
+                    }
+                }
+
+                if (showHeartPop) {
+                    LaunchedEffect(Unit) {
+                        delay(700)
+                        showHeartPop = false
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(100.dp)
+                            .background(Color.Transparent),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Favorite,
+                            contentDescription = "Liked Heart Pop",
+                            tint = Color.Red,
+                            modifier = Modifier.size(90.dp)
+                        )
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = {
+                            isLiked = !isLiked
+                            if (isLiked) {
+                                likesCount++
+                                viewModel.triggerConfetti()
+                                viewModel.showNotification("💖 Liked ${post.profile.name}'s feed post!")
+                            } else {
+                                likesCount--
+                            }
+                        }
+                    ) {
+                        Icon(
+                            imageVector = if (isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = "Like Button",
+                            tint = if (isLiked) Color.Red else Color.LightGray,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+
+                    IconButton(onClick = { viewModel.showNotification("💬 Scroll down to add a custom comment!") }) {
+                        Icon(
+                            imageVector = Icons.Default.Comment,
+                            contentDescription = "Comment Button",
+                            tint = Color.LightGray,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+
+                    IconButton(onClick = { showShareMenu = true }) {
+                        Icon(
+                            imageVector = Icons.Default.Share,
+                            contentDescription = "Share Button",
+                            tint = Color.LightGray,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = {
+                        isBookmarked = !isBookmarked
+                        if (isBookmarked) {
+                            viewModel.showNotification("🔖 Bookmarked ${post.profile.name}'s post!")
+                        } else {
+                            viewModel.showNotification("Removed bookmark.")
+                        }
+                    }
+                ) {
+                    Icon(
+                        imageVector = if (isBookmarked) Icons.Default.Bookmark else Icons.Default.BookmarkBorder,
+                        contentDescription = "Bookmark Button",
+                        tint = if (isBookmarked) TealAccent else Color.LightGray,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+            }
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp)
+                    .padding(bottom = 12.dp)
+            ) {
+                Text(
+                    text = "Liked by ${if (isLiked) "you and " else ""}$likesCount others",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = buildAnnotatedString {
+                            withStyle(style = SpanStyle(fontWeight = FontWeight.Bold, color = Color.White)) {
+                                append("${post.profile.name} ")
+                            }
+                            withStyle(style = SpanStyle(color = Color.LightGray)) {
+                                append(post.caption)
+                            }
+                        },
+                        fontSize = 12.sp
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                        .background(NavyDark.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                        .padding(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("⚡", fontSize = 12.sp)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Dating compatibility: Verified trust score is ${post.profile.trustScore}% (${post.profile.datingGoal})",
+                            color = TealAccent,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                if (localComments.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Comments (${localComments.size})",
+                        color = Color.Gray,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        localComments.forEach { (author, text, emoji) ->
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(emoji, fontSize = 12.sp)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = buildAnnotatedString {
+                                        withStyle(style = SpanStyle(fontWeight = FontWeight.Bold, color = TealAccent)) {
+                                            append("$author ")
+                                        }
+                                        withStyle(style = SpanStyle(color = Color.White)) {
+                                            append(text)
+                                        }
+                                    },
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = commentText,
+                        onValueChange = { commentText = it },
+                        placeholder = { Text("Add comment...", color = Color.Gray, fontSize = 11.sp) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(44.dp)
+                            .testTag("comment_input_${post.id}"),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White,
+                            focusedBorderColor = TealAccent,
+                            unfocusedBorderColor = NavyLight,
+                            focusedContainerColor = NavyDark.copy(alpha = 0.3f),
+                            unfocusedContainerColor = NavyDark.copy(alpha = 0.3f)
+                        ),
+                        shape = RoundedCornerShape(22.dp)
+                    )
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    TextButton(
+                        onClick = {
+                            if (commentText.isNotBlank()) {
+                                localComments.add(Triple("You", commentText, "😎"))
+                                viewModel.showNotification("💬 Added your comment on ${post.profile.name}'s post!")
+                                commentText = ""
+                            }
+                        },
+                        colors = ButtonDefaults.textButtonColors(contentColor = TealAccent)
+                    ) {
+                        Text("Post", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+
+    if (showShareMenu) {
+        ProfileCardShareDialog(
+            profile = post.profile,
+            viewModel = viewModel,
+            onDismiss = { showShareMenu = false }
+        )
+    }
+
+    if (showOptionsDialog) {
+        AlertDialog(
+            onDismissRequest = { showOptionsDialog = false },
+            title = { Text("Vibe Feed Actions", color = Color.White) },
+            text = { Text("Customize notifications, mute alerts, report profile, or bookmark this secure feed entry.", color = Color.Gray) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.showNotification("🚫 Reporting process initiated for ${post.profile.name}...")
+                        showOptionsDialog = false
+                    }
+                ) {
+                    Text("Report Post", color = Color.Red)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showOptionsDialog = false }) {
+                    Text("Cancel", color = Color.Gray)
+                }
+            },
+            containerColor = DarkSurface,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+}
+
+@Composable
+fun PostCardSkeleton() {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = DarkSurface.copy(alpha = 0.5f)),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(Color.Gray.copy(alpha = 0.2f)))
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Box(modifier = Modifier.width(100.dp).height(12.dp).background(Color.Gray.copy(alpha = 0.2f)))
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Box(modifier = Modifier.width(60.dp).height(8.dp).background(Color.Gray.copy(alpha = 0.2f)))
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Box(modifier = Modifier.fillMaxWidth().height(200.dp).background(Color.Gray.copy(alpha = 0.15f)))
+            Spacer(modifier = Modifier.height(12.dp))
+            Box(modifier = Modifier.width(150.dp).height(10.dp).background(Color.Gray.copy(alpha = 0.2f)))
         }
     }
 }
@@ -3423,7 +4937,7 @@ fun ChatScreen(
                                         Text(otherProfile.name, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Color.White)
                                         if (otherProfile.isVerified) {
                                             Spacer(modifier = Modifier.width(4.dp))
-                                            Icon(Icons.Default.CheckCircle, "Verified", tint = TealAccent, modifier = Modifier.size(16.dp))
+                                            VerifiedBadge(profile = otherProfile, showText = false, iconSize = 16.dp)
                                         }
                                     }
                                     Text("Online • verified safety", fontSize = 10.sp, color = TealAccent)
@@ -4589,6 +6103,43 @@ fun ComprehensiveProfileBuilder(
     userProfile: Profile
 ) {
     var isExpanded by remember { mutableStateOf(false) }
+    var showBuilderFaceScanDialog by remember { mutableStateOf(false) }
+    var editVerified by remember(userProfile) { mutableStateOf(userProfile.isVerified) }
+    val context = LocalContext.current
+
+    val locationLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+        val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
+        if (fineGranted || coarseGranted) {
+            viewModel.showNotification("📍 Location access granted! Coordinates updated.")
+        } else {
+            viewModel.showNotification("⚠️ Location access is required to find local singles.")
+        }
+    }
+
+    val mediaPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            viewModel.showNotification("🖼️ Photos permission granted! Media library unlocked.")
+        } else {
+            viewModel.showNotification("⚠️ Media permission denied. Using premium system presets.")
+        }
+    }
+
+    val cameraVerificationLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            viewModel.showNotification("📸 Camera granted! Initializing secure face scan...")
+            showBuilderFaceScanDialog = true
+            editVerified = true
+        } else {
+            viewModel.showNotification("⚠️ Camera access is required for real-time video verification.")
+        }
+    }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = DarkSurface),
@@ -4624,16 +6175,11 @@ fun ComprehensiveProfileBuilder(
                         )
                         if (userProfile.isVerified) {
                             Spacer(modifier = Modifier.width(4.dp))
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = "Verified",
-                                tint = TealAccent,
-                                modifier = Modifier.size(16.dp)
-                            )
+                            VerifiedBadge(profile = userProfile, showText = false, iconSize = 16.dp)
                         }
                     }
                     Text(
-                        text = if (isExpanded) "Tap to hide options" else "Tap to edit all options & visuals",
+                        text = if (isExpanded) "Tap to collapse settings" else "Tap to edit bio, photos & matching preferences",
                         color = Color.Gray,
                         fontSize = 11.sp
                     )
@@ -4668,7 +6214,7 @@ fun ComprehensiveProfileBuilder(
                     }
                 }
             } else {
-                // COMPREHENSIVE DETAILED BUILDER
+                // COMPREHENSIVE DETAILED BUILDER WITH 4 BEAUTIFUL TABS
                 Spacer(modifier = Modifier.height(14.dp))
                 Divider(color = NavyLight.copy(alpha = 0.3f))
                 Spacer(modifier = Modifier.height(14.dp))
@@ -4688,362 +6234,615 @@ fun ComprehensiveProfileBuilder(
                 var editLat by remember(userProfile) { mutableStateOf(userProfile.latitude.toString()) }
                 var editLng by remember(userProfile) { mutableStateOf(userProfile.longitude.toString()) }
                 
-                var editVerified by remember(userProfile) { mutableStateOf(userProfile.isVerified) }
                 var editTier by remember(userProfile) { mutableStateOf(userProfile.premiumTier) }
                 
                 var editImg1 by remember(userProfile) { mutableStateOf(userProfile.image1) }
                 var editImg2 by remember(userProfile) { mutableStateOf(userProfile.image2) }
                 var editImg3 by remember(userProfile) { mutableStateOf(userProfile.image3) }
+                var showPhotoStudioForSlot by remember { mutableStateOf<Int?>(null) }
+
+                // Collect preferences
+                val searchRadius by viewModel.searchRadiusKm.collectAsStateWithLifecycle()
+                val minAgePref by viewModel.minAgePreference.collectAsStateWithLifecycle()
+                val maxAgePref by viewModel.maxAgePreference.collectAsStateWithLifecycle()
+
+                var editSearchRadius by remember(searchRadius) { mutableIntStateOf(searchRadius) }
+                var editMinAge by remember(minAgePref) { mutableIntStateOf(minAgePref) }
+                var editMaxAge by remember(maxAgePref) { mutableIntStateOf(maxAgePref) }
 
                 var isSimulatingGps by remember { mutableStateOf(false) }
+                var activeSetupTab by remember { mutableStateOf("Basic") } // "Basic", "Bio", "Vibe", "Target"
 
-                // Row 1: Name and Age
+                // Horizontal Tab Bar Row
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(NavyDark.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    OutlinedTextField(
-                        value = editName,
-                        onValueChange = { editName = it },
-                        label = { Text("Display Name", color = Color.Gray, fontSize = 11.sp) },
-                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
-                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
-                        modifier = Modifier.weight(1.5f).testTag("builder_name_input")
+                    val tabs = listOf(
+                        "Basic" to "👤 Info",
+                        "Bio" to "📝 Story",
+                        "Vibe" to "🎨 Vibe",
+                        "Target" to "🎯 Matches"
                     )
-                    OutlinedTextField(
-                        value = editAge,
-                        onValueChange = { editAge = it },
-                        label = { Text("Age", color = Color.Gray, fontSize = 11.sp) },
-                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
-                        modifier = Modifier.weight(1f).testTag("builder_age_input")
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Row 2: Location & GPS Simulated Sync
-                OutlinedTextField(
-                    value = editLocation,
-                    onValueChange = { editLocation = it },
-                    label = { Text("Location City", color = Color.Gray, fontSize = 11.sp) },
-                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
-                    modifier = Modifier.fillMaxWidth().testTag("builder_location_input")
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedTextField(
-                        value = editLat,
-                        onValueChange = { editLat = it },
-                        label = { Text("Latitude (GPS)", color = Color.Gray, fontSize = 10.sp) },
-                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp),
-                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = editLng,
-                        onValueChange = { editLng = it },
-                        label = { Text("Longitude (GPS)", color = Color.Gray, fontSize = 10.sp) },
-                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp),
-                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
-                        modifier = Modifier.weight(1f)
-                    )
-                    Button(
-                        onClick = {
-                            isSimulatingGps = true
-                            editLat = "37." + (1000..9999).random()
-                            editLng = "-122." + (1000..9999).random()
-                            isSimulatingGps = false
-                            viewModel.showNotification("📍 Satellites Synchronized! Coordinates updated.")
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = NavyLight),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.height(50.dp)
-                    ) {
-                        Text(if (isSimulatingGps) "📡..." else "📍 Sync", fontSize = 11.sp, color = Color.White)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Row 3: Gender & Interested In Selection
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("My Gender", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            listOf("Male", "Female", "Non-binary").forEach { g ->
-                                val selected = editGender == g
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .background(if (selected) TealAccent else Color.DarkGray, RoundedCornerShape(8.dp))
-                                        .clickable { editGender = g }
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(g, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Interested In", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            listOf("Male", "Female", "Everyone").forEach { int ->
-                                val selected = editInterestedIn == int
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .background(if (selected) TealAccent else Color.DarkGray, RoundedCornerShape(8.dp))
-                                        .clickable { editInterestedIn = int }
-                                        .padding(vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(int, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Row 4: Bio and Interests
-                Text("Bio & Interests", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(4.dp))
-                OutlinedTextField(
-                    value = editBio,
-                    onValueChange = { editBio = it },
-                    label = { Text("Profile Bio (Describe yourself)", color = Color.Gray, fontSize = 11.sp) },
-                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
-                    maxLines = 3,
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                OutlinedTextField(
-                    value = editInterests,
-                    onValueChange = { editInterests = it },
-                    label = { Text("Interests (comma separated)", color = Color.Gray, fontSize = 11.sp) },
-                    textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
-                    colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Row 5: Avatar Emoji Customizer Grid
-                Text("Personalized Avatar Emoji", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(6.dp))
-                val emojiGrid = listOf("👩‍💻", "🎨", "🏋️‍♀️", "🌿", "🎮", "🌟", "👾", "🦊", "👑", "🎸", "🍕", "🦾")
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    emojiGrid.take(6).forEach { em ->
-                        val selected = editEmoji == em
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(if (selected) TealAccent else Color.DarkGray)
-                                .clickable { editEmoji = em },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(em, fontSize = 18.sp)
-                        }
-                    }
-                }
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    emojiGrid.drop(6).forEach { em ->
-                        val selected = editEmoji == em
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(if (selected) TealAccent else Color.DarkGray)
-                                .clickable { editEmoji = em },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(em, fontSize = 18.sp)
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Row 6: Gradient Background previews (0 to 5)
-                Text("Avatar Gradient Background Theme", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    AvatarGradients.forEachIndexed { idx, brush ->
-                        val selected = editGradientIndex == idx
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(CircleShape)
-                                .background(brush)
-                                .border(
-                                    width = if (selected) 3.dp else 0.dp,
-                                    color = if (selected) Color.White else Color.Transparent,
-                                    shape = CircleShape
-                                )
-                                .clickable { editGradientIndex = idx }
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Row 7: Dynamic Mock lifestyle photo manager
-                Text("Manage Your 3 Compulsory Photos (URLs)", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    listOf(1 to editImg1, 2 to editImg2, 3 to editImg3).forEach { (num, url) ->
+                    tabs.forEach { (tabKey, label) ->
+                        val isSelected = activeSetupTab == tabKey
                         Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .aspectRatio(1f)
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(DarkBackground)
+                                .background(if (isSelected) TealAccent.copy(alpha = 0.15f) else Color.Transparent)
                                 .border(
-                                    width = 1.dp,
-                                    color = if (url.isNotBlank()) TealAccent else Color.DarkGray,
+                                    width = if (isSelected) 1.dp else 0.dp,
+                                    color = if (isSelected) TealAccent.copy(alpha = 0.5f) else Color.Transparent,
                                     shape = RoundedCornerShape(8.dp)
                                 )
-                                .clickable {
-                                    val presets = listOf(
-                                        "https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400&q=80",
-                                        "https://images.unsplash.com/photo-1511920170033-f8396924c348?w=400&q=80",
-                                        "https://images.unsplash.com/photo-1519389950473-47ba0277781c?w=400&q=80",
-                                        "https://images.unsplash.com/photo-1448375240586-882707db888b?w=400&q=80"
-                                    )
-                                    val nextUrl = if (url.isBlank()) presets[0] else {
-                                        val curIdx = presets.indexOf(url)
-                                        if (curIdx == -1 || curIdx == presets.size - 1) "" else presets[curIdx + 1]
-                                    }
-                                    when (num) {
-                                        1 -> editImg1 = nextUrl
-                                        2 -> editImg2 = nextUrl
-                                        3 -> editImg3 = nextUrl
-                                    }
-                                    viewModel.showNotification("📸 Slot $num Photo updated with premium lifestyle mockup!")
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (url.isBlank()) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Icon(Icons.Default.Add, contentDescription = "Add", tint = Color.Gray, modifier = Modifier.size(16.dp))
-                                    Text("Slot $num", color = Color.Gray, fontSize = 8.sp)
-                                }
-                            } else {
-                                AsyncImage(
-                                    model = url,
-                                    contentDescription = "Slot $num",
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.BottomCenter)
-                                        .background(Color.Black.copy(alpha = 0.6f))
-                                        .fillMaxWidth()
-                                        .padding(vertical = 2.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("Active", color = TealAccent, fontSize = 8.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Row 8: Verified checkmark toggle & Premium Subscription Tier
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("🛡️ Direct Verified Checkmark", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                        Text("Instant simulated admin blue badge approval.", color = Color.Gray, fontSize = 10.sp)
-                    }
-                    Switch(
-                        checked = editVerified,
-                        onCheckedChange = { editVerified = it },
-                        colors = SwitchDefaults.colors(checkedThumbColor = TealAccent, checkedTrackColor = TealVibrant)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Text("Membership Subscription Tier", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    listOf("None" to Color.Gray, "Premium" to TealAccent, "Premium Pro" to Color(0xFFFFD700)).forEach { (tier, color) ->
-                        val selected = editTier == tier
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .background(if (selected) color.copy(alpha = 0.2f) else NavyLight, RoundedCornerShape(10.dp))
-                                .border(
-                                    width = if (selected) 2.dp else 1.dp,
-                                    color = if (selected) color else Color.Transparent,
-                                    shape = RoundedCornerShape(10.dp)
-                                )
-                                .clickable { editTier = tier }
+                                .clickable { activeSetupTab = tabKey }
                                 .padding(vertical = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(tier, color = if (selected) color else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = label,
+                                color = if (isSelected) TealAccent else Color.Gray,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Update Action Button
+                when (activeSetupTab) {
+                    "Basic" -> {
+                        // TAB 1: BASIC INFO
+                        Text("👤 Personal Identity Details", color = TealAccent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = editName,
+                                onValueChange = { editName = it },
+                                label = { Text("Display Name", color = Color.Gray, fontSize = 11.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
+                                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
+                                modifier = Modifier.weight(1.5f).testTag("builder_name_input")
+                            )
+                            OutlinedTextField(
+                                value = editAge,
+                                onValueChange = { editAge = it },
+                                label = { Text("Age", color = Color.Gray, fontSize = 11.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
+                                modifier = Modifier.weight(1f).testTag("builder_age_input")
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        OutlinedTextField(
+                            value = editLocation,
+                            onValueChange = { editLocation = it },
+                            label = { Text("Location City", color = Color.Gray, fontSize = 11.sp) },
+                            textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
+                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
+                            modifier = Modifier.fillMaxWidth().testTag("builder_location_input")
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = editLat,
+                                onValueChange = { editLat = it },
+                                label = { Text("Latitude (GPS)", color = Color.Gray, fontSize = 10.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp),
+                                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedTextField(
+                                value = editLng,
+                                onValueChange = { editLng = it },
+                                label = { Text("Longitude (GPS)", color = Color.Gray, fontSize = 10.sp) },
+                                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 12.sp),
+                                colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
+                                modifier = Modifier.weight(1f)
+                            )
+                            Button(
+                                onClick = {
+                                    val fineGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                                    val coarseGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                                    if (fineGranted || coarseGranted) {
+                                        isSimulatingGps = true
+                                        editLat = "37." + (1000..9999).random()
+                                        editLng = "-122." + (1000..9999).random()
+                                        isSimulatingGps = false
+                                        viewModel.showNotification("📍 Satellites Synchronized! Coordinates updated.")
+                                    } else {
+                                        locationLauncher.launch(
+                                            arrayOf(
+                                                Manifest.permission.ACCESS_FINE_LOCATION,
+                                                Manifest.permission.ACCESS_COARSE_LOCATION
+                                            )
+                                        )
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = NavyLight),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.height(50.dp)
+                            ) {
+                                Text(if (isSimulatingGps) "📡..." else "📍 Sync", fontSize = 11.sp, color = Color.White)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Column {
+                            Text("My Gender Identity", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf("Male", "Female", "Non-binary").forEach { g ->
+                                    val selected = editGender == g
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .background(if (selected) TealAccent else Color.DarkGray, RoundedCornerShape(8.dp))
+                                            .clickable { editGender = g }
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(g, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "Bio" -> {
+                        // TAB 2: BIO & PHOTOS
+                        Text("📝 Bio Narrative & Compulsory Photos", color = TealAccent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Bio Character Count Display
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Describe Yourself", color = Color.Gray, fontSize = 11.sp)
+                            Text("${editBio.length}/300 chars", color = if (editBio.length > 250) Color.Yellow else Color.Gray, fontSize = 10.sp)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedTextField(
+                            value = editBio,
+                            onValueChange = { if (it.length <= 300) editBio = it },
+                            placeholder = { Text("Write your catchy bio here...", color = Color.Gray, fontSize = 12.sp) },
+                            textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
+                            maxLines = 4,
+                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
+                            modifier = Modifier.fillMaxWidth().height(100.dp)
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Bio Prompt Templates
+                        Text("💡 Quick Smart-Bio Suggestions (Tap to insert):", color = Color.Gray, fontSize = 10.sp)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        val bioPresets = listOf(
+                            "☕ Tech architect & coffee purist looking for a Player 2 to explore indie game bars and sunset hiking trails with.",
+                            "🎨 Fluid artist & yoga teacher seeking authentic connections. Let's debate sci-fi cinema and discover the best late-night tacos."
+                        )
+                        bioPresets.forEach { preset ->
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(NavyDark.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                    .border(0.5.dp, TealVibrant.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                    .clickable { editBio = preset; viewModel.showNotification("✨ Bio preset template applied!") }
+                                    .padding(8.dp)
+                            ) {
+                                Text(preset, color = Color.LightGray, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Text("Manage 3 Compulsory Lifestyle Photo Slots", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            listOf(1 to editImg1, 2 to editImg2, 3 to editImg3).forEach { (num, url) ->
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .aspectRatio(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(DarkBackground)
+                                        .border(
+                                            width = 1.dp,
+                                            color = if (url.isNotBlank()) TealAccent else Color.DarkGray,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .clickable {
+                                            showPhotoStudioForSlot = num
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (url.isBlank()) {
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Icon(Icons.Default.Add, contentDescription = "Add", tint = Color.Gray, modifier = Modifier.size(16.dp))
+                                            Text("Slot $num", color = Color.Gray, fontSize = 8.sp)
+                                        }
+                                    } else {
+                                        AsyncImage(
+                                            model = url,
+                                            contentDescription = "Slot $num",
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .align(Alignment.BottomCenter)
+                                                .background(Color.Black.copy(alpha = 0.6f))
+                                                .fillMaxWidth()
+                                                .padding(vertical = 2.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text("Active", color = TealAccent, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "Vibe" -> {
+                        // TAB 3: INTERESTS & VIBE
+                        Text("🎨 Vibe Alignments & Interest Tags", color = TealAccent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Text("Interactive Smart Tags (Tap to toggle):", color = Color.Gray, fontSize = 11.sp)
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        // Predefined Tags Grid
+                        val predefinedInterests = listOf("Hiking", "Coffee", "Tech", "Music", "Fitness", "Gaming", "Travel", "Art", "Books", "Foodie", "Pets", "Movies")
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val chunked = predefinedInterests.chunked(4)
+                            chunked.forEach { rowTags ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    rowTags.forEach { tag ->
+                                        val isSelected = editInterests.split(",").map { it.trim().lowercase() }.contains(tag.lowercase())
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(if (isSelected) TealAccent.copy(alpha = 0.2f) else NavyLight)
+                                                .border(1.dp, if (isSelected) TealAccent else Color.Transparent, RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    val currentList = editInterests.split(",")
+                                                        .map { it.trim() }
+                                                        .filter { it.isNotBlank() }
+                                                        .toMutableList()
+                                                    val foundIdx = currentList.indexOfFirst { it.equals(tag, ignoreCase = true) }
+                                                    if (foundIdx != -1) {
+                                                        currentList.removeAt(foundIdx)
+                                                    } else {
+                                                        currentList.add(tag)
+                                                    }
+                                                    editInterests = currentList.joinToString(", ")
+                                                }
+                                                .padding(vertical = 6.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(tag, color = if (isSelected) TealAccent else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        OutlinedTextField(
+                            value = editInterests,
+                            onValueChange = { editInterests = it },
+                            label = { Text("Custom Interests (comma separated)", color = Color.Gray, fontSize = 11.sp) },
+                            textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 13.sp),
+                            colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = TealAccent, unfocusedBorderColor = Color.DarkGray),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Personalized Avatar Emojis Customizer
+                        Text("Personalized Avatar Emoji", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        val emojiGrid = listOf("👩‍💻", "🎨", "🏋️‍♀️", "🌿", "🎮", "🌟", "👾", "🦊", "👑", "🎸", "🍕", "🦾")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            emojiGrid.take(6).forEach { em ->
+                                val selected = editEmoji == em
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(if (selected) TealAccent else Color.DarkGray)
+                                        .clickable { editEmoji = em },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(em, fontSize = 18.sp)
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            emojiGrid.drop(6).forEach { em ->
+                                val selected = editEmoji == em
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(if (selected) TealAccent else Color.DarkGray)
+                                        .clickable { editEmoji = em },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(em, fontSize = 18.sp)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // Avatar Gradients Customizer
+                        Text("Avatar Gradient Theme", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            AvatarGradients.forEachIndexed { idx, brush ->
+                                val selected = editGradientIndex == idx
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(brush)
+                                        .border(
+                                            width = if (selected) 3.dp else 0.dp,
+                                            color = if (selected) Color.White else Color.Transparent,
+                                            shape = CircleShape
+                                        )
+                                        .clickable { editGradientIndex = idx }
+                                )
+                            }
+                        }
+                    }
+                    "Target" -> {
+                        // TAB 4: TARGET & MATCH PREFERENCES
+                        Text("🎯 Matchmaking Prefs & Target Criteria", color = TealAccent, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Column {
+                            Text("Dating Intent Target Goal", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            val goals = listOf("💍 Serious Match", "🥂 Casual Fun", "✨ Just Friends", "🧩 Chat & See")
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                goals.take(2).forEach { goal ->
+                                    val activeGoal = viewModel.activeUserGoal.collectAsStateWithLifecycle().value
+                                    val isSelected = activeGoal == goal
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .background(if (isSelected) TealAccent.copy(alpha = 0.2f) else NavyLight, RoundedCornerShape(8.dp))
+                                            .border(1.dp, if (isSelected) TealAccent else Color.Transparent, RoundedCornerShape(8.dp))
+                                            .clickable { viewModel.changeUserDatingGoal(goal) }
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(goal, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                goals.drop(2).forEach { goal ->
+                                    val activeGoal = viewModel.activeUserGoal.collectAsStateWithLifecycle().value
+                                    val isSelected = activeGoal == goal
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .background(if (isSelected) TealAccent.copy(alpha = 0.2f) else NavyLight, RoundedCornerShape(8.dp))
+                                            .border(1.dp, if (isSelected) TealAccent else Color.Transparent, RoundedCornerShape(8.dp))
+                                            .clickable { viewModel.changeUserDatingGoal(goal) }
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(goal, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Column {
+                            Text("Interested In Gender", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                listOf("Male", "Female", "Everyone").forEach { int ->
+                                    val selected = editInterestedIn == int
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .background(if (selected) TealAccent else Color.DarkGray, RoundedCornerShape(8.dp))
+                                            .clickable { editInterestedIn = int }
+                                            .padding(vertical = 10.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(int, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        // Match Search Distance Preference Slider
+                        Column {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Maximum Search Distance", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Text("$editSearchRadius km", color = TealAccent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Slider(
+                                value = editSearchRadius.toFloat(),
+                                onValueChange = { editSearchRadius = it.roundToInt() },
+                                valueRange = 10f..150f,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = TealAccent,
+                                    activeTrackColor = TealVibrant,
+                                    inactiveTrackColor = Color.DarkGray
+                                ),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Age Filter Range Preference Selector
+                        Column {
+                            Text("Preferred Match Age Range", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Min Age: $editMinAge", color = Color.Gray, fontSize = 10.sp)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        IconButton(
+                                            onClick = { if (editMinAge > 18) editMinAge-- },
+                                            modifier = Modifier.size(28.dp).background(NavyLight, CircleShape)
+                                        ) {
+                                            Text("-", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                        Text("$editMinAge", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                        IconButton(
+                                            onClick = { if (editMinAge < editMaxAge) editMinAge++ },
+                                            modifier = Modifier.size(28.dp).background(NavyLight, CircleShape)
+                                        ) {
+                                            Text("+", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Max Age: $editMaxAge", color = Color.Gray, fontSize = 10.sp)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        IconButton(
+                                            onClick = { if (editMaxAge > editMinAge) editMaxAge-- },
+                                            modifier = Modifier.size(28.dp).background(NavyLight, CircleShape)
+                                        ) {
+                                            Text("-", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                        Text("$editMaxAge", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                        IconButton(
+                                            onClick = { if (editMaxAge < 80) editMaxAge++ },
+                                            modifier = Modifier.size(28.dp).background(NavyLight, CircleShape)
+                                        ) {
+                                            Text("+", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        // Verified & Membership settings (Better Options)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("🛡️ Verified Blue Badge", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                Text("Instant verified checkmark badge approval.", color = Color.Gray, fontSize = 9.sp)
+                            }
+                            Switch(
+                                checked = editVerified,
+                                onCheckedChange = { checked ->
+                                    if (checked) {
+                                        val hasCam = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                                        if (hasCam) {
+                                            showBuilderFaceScanDialog = true
+                                            editVerified = true
+                                        } else {
+                                            cameraVerificationLauncher.launch(Manifest.permission.CAMERA)
+                                        }
+                                    } else {
+                                        editVerified = false
+                                    }
+                                },
+                                colors = SwitchDefaults.colors(checkedThumbColor = TealAccent, checkedTrackColor = TealVibrant)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Text("Membership Subscription Tier", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            listOf("None" to Color.Gray, "Premium" to TealAccent, "Premium Pro" to Color(0xFFFFD700)).forEach { (tier, color) ->
+                                val selected = editTier == tier
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .background(if (selected) color.copy(alpha = 0.2f) else NavyLight, RoundedCornerShape(10.dp))
+                                        .border(
+                                            width = if (selected) 2.dp else 1.dp,
+                                            color = if (selected) color else Color.Transparent,
+                                            shape = RoundedCornerShape(10.dp)
+                                        )
+                                        .clickable { editTier = tier }
+                                        .padding(vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(tier, color = if (selected) color else Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // SAVE & APPLY ALL PROFILE CUSTOMIZATIONS
                 Button(
                     onClick = {
                         val ageInt = editAge.toIntOrNull() ?: userProfile.age
                         val latD = editLat.toDoubleOrNull() ?: userProfile.latitude
                         val lngD = editLng.toDoubleOrNull() ?: userProfile.longitude
+                        
+                        // Save basic and complete profile fields
                         viewModel.updateUserProfileComplete(
                             name = editName,
                             age = ageInt,
@@ -5062,6 +6861,13 @@ fun ComprehensiveProfileBuilder(
                             image2 = editImg2,
                             image3 = editImg3
                         )
+                        
+                        // Save matchmaking filters StateFlows in ViewModel
+                        viewModel.updateMatchPreferences(
+                            radius = editSearchRadius,
+                            minAge = editMinAge,
+                            maxAge = editMaxAge
+                        )
                         isExpanded = false
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
@@ -5070,15 +6876,49 @@ fun ComprehensiveProfileBuilder(
                 ) {
                     Text("Save & Apply All Profile Customizations", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 }
+                if (showPhotoStudioForSlot != null) {
+                    PhotoUploadStudioDialog(
+                        slotNum = showPhotoStudioForSlot ?: 1,
+                        currentUrl = when (showPhotoStudioForSlot) {
+                            1 -> editImg1
+                            2 -> editImg2
+                            3 -> editImg3
+                            else -> ""
+                        },
+                        onDismiss = { showPhotoStudioForSlot = null },
+                        onPhotoSelected = { hqUrl ->
+                            val slot = showPhotoStudioForSlot ?: 1
+                            when (slot) {
+                                1 -> editImg1 = hqUrl
+                                2 -> editImg2 = hqUrl
+                                3 -> editImg3 = hqUrl
+                            }
+                            showPhotoStudioForSlot = null
+                            viewModel.showNotification("📸 Slot $slot Photo updated with premium high-quality image!")
+                        },
+                        viewModel = viewModel
+                    )
+                }
             }
         }
+    }
+
+    if (showBuilderFaceScanDialog) {
+        VideoVerificationDialog(
+            onDismiss = { showBuilderFaceScanDialog = false },
+            viewModel = viewModel
+        )
     }
 }
 
 // --- System Admin and Settings Screen ---
 
 @Composable
-fun SystemAdminScreen(viewModel: DatingViewModel, onOpenSupport: () -> Unit = {}) {
+fun SystemAdminScreen(
+    viewModel: DatingViewModel,
+    onOpenSupport: () -> Unit = {},
+    onNavigateToChat: (Int) -> Unit = {}
+) {
     val profiles by viewModel.otherProfiles.collectAsStateWithLifecycle()
     val userProfile by viewModel.userProfile.collectAsStateWithLifecycle()
 
@@ -5179,6 +7019,19 @@ fun SystemAdminScreen(viewModel: DatingViewModel, onOpenSupport: () -> Unit = {}
                     )
                 }
             }
+        }
+
+        // App Privacy & Permissions Center
+        item {
+            PrivacyPermissionsCard(viewModel = viewModel)
+        }
+
+        // Premium Add-ons & Subscription Plans Setting Option
+        item {
+            PremiumAddonsCard(
+                viewModel = viewModel,
+                onNavigateToChat = onNavigateToChat
+            )
         }
 
         // Active user card display
@@ -5811,12 +7664,7 @@ fun SystemAdminScreen(viewModel: DatingViewModel, onOpenSupport: () -> Unit = {}
                     // Fake logs display
                     Spacer(modifier = Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = if (profile.isVerified) Icons.Default.CheckCircle else Icons.Default.Warning,
-                            contentDescription = "Safe",
-                            tint = if (profile.isVerified) TealAccent else Color.Red,
-                            modifier = Modifier.size(14.dp)
-                        )
+                        VerifiedBadge(profile = profile, showText = false, iconSize = 14.dp)
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
                             text = if (profile.isFakeFlagged) "Flagged: Fake Account" else "Verified Active Member",
@@ -5925,6 +7773,925 @@ fun SystemAdminScreen(viewModel: DatingViewModel, onOpenSupport: () -> Unit = {}
                 }
             },
             containerColor = DarkSurface
+        )
+    }
+}
+
+@Composable
+fun PremiumAddonsCard(
+    viewModel: DatingViewModel,
+    onNavigateToChat: (Int) -> Unit
+) {
+    val userProfile by viewModel.userProfile.collectAsStateWithLifecycle()
+    val currentLocation by viewModel.currentLocation.collectAsStateWithLifecycle()
+    val virtualPartnerName by viewModel.virtualPartnerName.collectAsStateWithLifecycle()
+    val virtualScenario by viewModel.virtualScenario.collectAsStateWithLifecycle()
+    val virtualDateMessages by viewModel.virtualDateMessages.collectAsStateWithLifecycle()
+    val isVirtualDateLoading by viewModel.isVirtualDateLoading.collectAsStateWithLifecycle()
+
+    var activePaymentPlan by remember { mutableStateOf<String?>(null) }
+    val currentTier = userProfile?.premiumTier ?: "None"
+    var isExpanded by remember { mutableStateOf(false) }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, if (isExpanded) Color(0xFFFFD700).copy(alpha = 0.5f) else Color.Transparent),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("premium_addons_settings_card")
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { isExpanded = !isExpanded },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFFFD700).copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Star,
+                            contentDescription = "Premium Add-ons",
+                            tint = Color(0xFFFFD700),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "👑 Premium Add-ons & Plans",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Text(
+                            text = if (isExpanded) "Tap to collapse options" else "Manage UPI plans, teleport GPS, nearby radar & virtual dates",
+                            color = Color.Gray,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                IconButton(onClick = { isExpanded = !isExpanded }) {
+                    Icon(
+                        imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Expand",
+                        tint = Color.White
+                    )
+                }
+            }
+
+            if (isExpanded) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Divider(color = NavyLight.copy(alpha = 0.3f))
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    // Neon Premium Hub Title Header
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(
+                                        Color(0xFFFFD700),
+                                        Color(0xFFFF4081),
+                                        Color(0xFF00E5FF)
+                                    )
+                                ),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .padding(1.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(DarkSurface, RoundedCornerShape(15.dp))
+                                .padding(16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = "👑 CORRECT PREMIUM HUB",
+                                    color = Color(0xFFFFD700),
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    letterSpacing = 1.sp
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Unlock next-generation dating security & future simulation options.",
+                                    color = Color.LightGray,
+                                    fontSize = 11.sp,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    }
+
+                    // Tier status panel
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = NavyLight.copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, TealAccent.copy(alpha = 0.3f))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text("Membership Tier", color = Color.Gray, fontSize = 11.sp)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = when (currentTier) {
+                                        "Premium" -> "👑 Premium (₹1/day)"
+                                        "Premium Plus", "Premium Pro" -> "💎 Premium Plus (₹9/day)"
+                                        else -> "Standard Account (Free)"
+                                    },
+                                    color = when (currentTier) {
+                                        "Premium" -> Color(0xFFFFD700)
+                                        "Premium Plus", "Premium Pro" -> Color(0xFF00E5FF)
+                                        else -> Color.White
+                                    },
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .background(
+                                        if (currentTier != "None") TealVibrant.copy(alpha = 0.2f) else DarkBackground,
+                                        RoundedCornerShape(12.dp)
+                                    )
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = if (currentTier != "None") "ACTIVE" else "UPGRADE",
+                                    color = if (currentTier != "None") TealAccent else Color.Gray,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    // Choose Your Upgrade Plan Header
+                    Text(
+                        text = "Choose Your Upgrade Plan",
+                        color = TealAccent,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+
+                    // Premium Club Plan Card (₹1/day)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(Color(0xFFFFB300), Color(0xFFFF6F00))
+                                ),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .clickable { activePaymentPlan = "Premium" }
+                            .padding(1.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(DarkSurface, RoundedCornerShape(15.dp))
+                                .padding(16.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text("👑 Premium Member", color = Color(0xFFFFD700), fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
+                                    Text("Standard security & matching package", color = Color.Gray, fontSize = 11.sp)
+                                }
+                                Text("₹1/day", color = Color(0xFFFFD700), fontWeight = FontWeight.Black, fontSize = 18.sp)
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("✓ Priority Matching Boost: 5x profile visibility", color = Color.White, fontSize = 12.sp)
+                            Text("✓ Dynamic Vibe customizers (Moods & Goals)", color = Color.White, fontSize = 12.sp)
+                            Text("✓ Unlimited safe profile audits / integrity checks", color = Color.White, fontSize = 12.sp)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Button(
+                                onClick = { activePaymentPlan = "Premium" },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFA000)),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = if (currentTier == "Premium") "Current Plan (Tap to Reactivate)" else "Sign Up for Premium (₹1/day)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = Color.Black
+                                )
+                            }
+                        }
+                    }
+
+                    // Premium Plus Plan Card (₹9/day)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(Color(0xFF00E5FF), Color(0xFFE040FB), Color(0xFFFF4081))
+                                ),
+                                RoundedCornerShape(16.dp)
+                            )
+                            .clickable { activePaymentPlan = "Premium Plus" }
+                            .padding(1.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(DarkSurface, RoundedCornerShape(15.dp))
+                                .padding(16.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("💎 Premium Plus", color = Color(0xFF00E5FF), fontWeight = FontWeight.ExtraBold, fontSize = 15.sp)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .background(Color(0xFFFF4081), RoundedCornerShape(4.dp))
+                                                .padding(horizontal = 4.dp, vertical = 1.dp)
+                                        ) {
+                                            Text("BEST VALUE", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                    Text("Full safety suite and all AI simulator powers", color = Color.Gray, fontSize = 11.sp)
+                                }
+                                Text("₹9/day", color = Color(0xFF00E5FF), fontWeight = FontWeight.Black, fontSize = 18.sp)
+                            }
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("⚡ Unlocks ALL standard Premium privileges plus:", color = Color(0xFFE040FB), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text("✓ Device PIN startup protection lock", color = Color.White, fontSize = 12.sp)
+                            Text("✓ Stealth Shield Incognito Mode visibility toggle", color = Color.White, fontSize = 12.sp)
+                            Text("✓ Travel Teleport GPS companion to match globally", color = Color.White, fontSize = 12.sp)
+                            Text("✓ Real-Time AI Fraud Prevention filter shield", color = Color.White, fontSize = 12.sp)
+                            Text("✓ Unlimited access to AI Virtual Date Simulator", color = Color.White, fontSize = 12.sp)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Button(
+                                onClick = { activePaymentPlan = "Premium Plus" },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF)),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = if (currentTier == "Premium Plus" || currentTier == "Premium Pro") "Active Premium Plus (Tap to Re-verify)" else "Sign Up for Premium Plus (₹9/day)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = Color.Black
+                                )
+                            }
+                        }
+                    }
+
+                    // Section 2: Future Feature GPS Teleportation (Travel Companion)
+                    Text(
+                        text = "✈️ GPS Teleport (Travel Companion)",
+                        color = TealAccent,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = NavyLight.copy(alpha = 0.3f)),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, TealAccent.copy(alpha = 0.2f))
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                text = "Change your location instantly to match with singles anywhere on earth! Currently matching in:",
+                                color = Color.Gray,
+                                fontSize = 11.sp
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .background(DarkBackground, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Icon(Icons.Default.Place, contentDescription = "Pin", tint = TealAccent, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(currentLocation, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+
+                            if (currentTier == "None") {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+                                        .padding(12.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "🔒 Unlocks with Premium membership. Subscribe to teleport now!",
+                                        color = Color(0xFFFFD700),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            } else {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text("Select a destination:", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Spacer(modifier = Modifier.height(8.dp))
+                                val destinations = listOf(
+                                    "Tokyo, Japan 🇯🇵",
+                                    "London, UK 🇬🇧",
+                                    "Paris, France 🇫🇷",
+                                    "Sydney, Australia 🇦🇺",
+                                    "New York, NY 🇺🇸"
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    destinations.take(3).forEach { city ->
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .background(if (currentLocation == city) TealVibrant else DarkBackground, RoundedCornerShape(10.dp))
+                                                .border(1.dp, if (currentLocation == city) TealAccent else Color.Transparent, RoundedCornerShape(10.dp))
+                                                .clickable { viewModel.changeDatingLocation(city) }
+                                                .padding(vertical = 8.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(city.substringBefore(" "), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                                        }
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    destinations.drop(3).forEach { city ->
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .background(if (currentLocation == city) TealVibrant else DarkBackground, RoundedCornerShape(10.dp))
+                                                .border(1.dp, if (currentLocation == city) TealAccent else Color.Transparent, RoundedCornerShape(10.dp))
+                                                .clickable { viewModel.changeDatingLocation(city) }
+                                                .padding(vertical = 8.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(city.substringBefore(" "), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Section 3: Real-Time GPS Local Radar (Find Nearby)
+                    Text(
+                        text = "📍 Real-Time GPS Local Radar",
+                        color = TealAccent,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+
+                    val gpsEnabled by viewModel.gpsEnabled.collectAsStateWithLifecycle()
+                    val nearbyRadiusKm by viewModel.nearbyRadiusKm.collectAsStateWithLifecycle()
+                    val isScanningNearby by viewModel.isScanningNearby.collectAsStateWithLifecycle()
+                    val otherProfilesList by viewModel.otherProfiles.collectAsStateWithLifecycle()
+
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = NavyLight.copy(alpha = 0.3f)),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, TealAccent.copy(alpha = 0.2f))
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text("Local Airspace Scan", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                    Text("Search using high-precision GPS telemetry", color = Color.Gray, fontSize = 11.sp)
+                                }
+                                Switch(
+                                    checked = gpsEnabled,
+                                    onCheckedChange = { viewModel.toggleGps(it) },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = TealAccent,
+                                        checkedTrackColor = TealVibrant
+                                    )
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            if (!gpsEnabled) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(Color.Red.copy(alpha = 0.15f), RoundedCornerShape(10.dp))
+                                        .border(1.dp, Color.Red.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+                                        .padding(12.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Default.Warning, contentDescription = "GPS Inactive", tint = Color.Red, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text("GPS Satellites Disconnected. Enable GPS to scan nearby airspace.", color = Color.LightGray, fontSize = 11.sp)
+                                    }
+                                }
+                            } else {
+                                // Radius Slider
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Scan Radius", color = Color.LightGray, fontSize = 11.sp)
+                                    Text("${nearbyRadiusKm.toInt()} km", color = TealAccent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                                Slider(
+                                    value = nearbyRadiusKm,
+                                    onValueChange = { viewModel.setNearbyRadius(it) },
+                                    valueRange = 5f..100f,
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = TealAccent,
+                                        activeTrackColor = TealVibrant,
+                                        inactiveTrackColor = DarkBackground
+                                    )
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                // Radar Sonar Scan Animation
+                                if (isScanningNearby) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(180.dp)
+                                            .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                                            .padding(8.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        val infiniteTransition = rememberInfiniteTransition(label = "RadarSweep")
+                                        val angle by infiniteTransition.animateFloat(
+                                            initialValue = 0f,
+                                            targetValue = 360f,
+                                            animationSpec = infiniteRepeatable(
+                                                animation = tween(2000, easing = LinearEasing),
+                                                repeatMode = RepeatMode.Restart
+                                            ),
+                                            label = "RadarAngle"
+                                        )
+                                        val pulseRadius by infiniteTransition.animateFloat(
+                                            initialValue = 10f,
+                                            targetValue = 200f,
+                                            animationSpec = infiniteRepeatable(
+                                                animation = tween(2500, easing = EaseOutExpo),
+                                                repeatMode = RepeatMode.Restart
+                                            ),
+                                            label = "RadarPulse"
+                                        )
+                                        val pulseAlpha by infiniteTransition.animateFloat(
+                                            initialValue = 0.8f,
+                                            targetValue = 0f,
+                                            animationSpec = infiniteRepeatable(
+                                                animation = tween(2500, easing = EaseOutExpo),
+                                                repeatMode = RepeatMode.Restart
+                                            ),
+                                            label = "RadarAlpha"
+                                        )
+
+                                        Canvas(modifier = Modifier.fillMaxSize()) {
+                                            val center = Offset(size.width / 2, size.height / 2)
+                                            val maxRadius = Math.min(size.width, size.height) / 2
+
+                                            // Draw concentric radar rings
+                                            drawCircle(
+                                                color = TealAccent.copy(alpha = 0.15f),
+                                                radius = maxRadius * 0.33f,
+                                                center = center,
+                                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx())
+                                            )
+                                            drawCircle(
+                                                color = TealAccent.copy(alpha = 0.15f),
+                                                radius = maxRadius * 0.66f,
+                                                center = center,
+                                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx())
+                                            )
+                                            drawCircle(
+                                                color = TealAccent.copy(alpha = 0.3f),
+                                                radius = maxRadius,
+                                                center = center,
+                                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx())
+                                            )
+
+                                            // Draw pulsing wave
+                                            drawCircle(
+                                                color = TealAccent.copy(alpha = pulseAlpha),
+                                                radius = Math.min(pulseRadius, maxRadius),
+                                                center = center
+                                            )
+
+                                            // Draw radar sweep line
+                                            val rad = Math.toRadians(angle.toDouble())
+                                            val sweepX = center.x + maxRadius * Math.cos(rad).toFloat()
+                                            val sweepY = center.y + maxRadius * Math.sin(rad).toFloat()
+                                            drawLine(
+                                                color = TealAccent,
+                                                start = center,
+                                                end = Offset(sweepX, sweepY),
+                                                strokeWidth = 2.dp.toPx()
+                                            )
+                                        }
+
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            CircularProgressIndicator(color = TealAccent, modifier = Modifier.size(24.dp))
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Text("📡 PINGING LOCAL GPS AIRSPACE...", color = TealAccent, fontWeight = FontWeight.Bold, fontSize = 10.sp, letterSpacing = 1.sp)
+                                            Text("E2EE Telemetry Protocol active", color = Color.Gray, fontSize = 8.sp)
+                                        }
+                                    }
+                                } else {
+                                    Button(
+                                        onClick = { viewModel.triggerNearbyScan() },
+                                        colors = ButtonDefaults.buttonColors(containerColor = TealVibrant),
+                                        shape = RoundedCornerShape(10.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(Icons.Default.Refresh, contentDescription = "Scan", tint = Color.White, modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text("Scan Local Area Nearby", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(12.dp))
+
+                                    // Filtered nearby profiles list
+                                    val nearbyProfiles = otherProfilesList.filter { profile ->
+                                        val distance = viewModel.getDistanceToProfile(profile)
+                                        distance <= nearbyRadiusKm
+                                    }.sortedBy { viewModel.getDistanceToProfile(it) }
+
+                                    if (nearbyProfiles.isEmpty()) {
+                                        Text(
+                                            text = "No one found nearby within ${nearbyRadiusKm.toInt()} km. Expand scan radius or teleport to another city!",
+                                            color = Color.Gray,
+                                            fontSize = 11.sp,
+                                            textAlign = TextAlign.Center,
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
+                                        )
+                                    } else {
+                                        Text(
+                                            text = "📡 Nearby Profiles Detected (${nearbyProfiles.size}):",
+                                            color = Color.LightGray,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(bottom = 8.dp)
+                                        )
+
+                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            nearbyProfiles.forEach { profile ->
+                                                val dist = viewModel.getDistanceToProfile(profile)
+                                                Card(
+                                                    colors = CardDefaults.cardColors(containerColor = DarkBackground),
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .padding(10.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.SpaceBetween
+                                                    ) {
+                                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .size(36.dp)
+                                                                    .clip(CircleShape)
+                                                                    .background(AvatarGradients[profile.avatarGradientIndex]),
+                                                                contentAlignment = Alignment.Center
+                                                            ) {
+                                                                Text(profile.avatarEmoji, fontSize = 18.sp)
+                                                            }
+
+                                                            Spacer(modifier = Modifier.width(8.dp))
+
+                                                            Column {
+                                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                    Text(profile.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                                                    Text(", ${profile.age}", color = Color.LightGray, fontSize = 12.sp)
+                                                                    if (profile.isVerified) {
+                                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                                        VerifiedBadge(profile = profile, showText = false, iconSize = 12.dp)
+                                                                    }
+                                                                }
+                                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                                    Icon(Icons.Default.Place, contentDescription = "Distance", tint = TealAccent, modifier = Modifier.size(10.dp))
+                                                                    Spacer(modifier = Modifier.width(2.dp))
+                                                                    Text(String.format("%.1f km away", dist), color = TealAccent, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                                    Box(
+                                                                        modifier = Modifier
+                                                                            .background(TealVibrant.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
+                                                                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                                                                    ) {
+                                                                        Text("🛡️ ${profile.trustScore}% trust", color = TealAccent, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        Button(
+                                                            onClick = {
+                                                                viewModel.startDirectChat(profile.id) { matchId ->
+                                                                    onNavigateToChat(matchId)
+                                                                }
+                                                            },
+                                                            colors = ButtonDefaults.buttonColors(containerColor = TealAccent),
+                                                            shape = RoundedCornerShape(8.dp),
+                                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                            modifier = Modifier.height(28.dp)
+                                                        ) {
+                                                            Text("💬 Chat Direct", color = NavyDark, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Section 4: AI Virtual Date Simulator
+                    Text(
+                        text = "🔮 AI Virtual Date Simulator",
+                        color = TealAccent,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp
+                    )
+
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = NavyLight.copy(alpha = 0.3f)),
+                        shape = RoundedCornerShape(16.dp),
+                        border = BorderStroke(1.dp, TealAccent.copy(alpha = 0.2f))
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                text = "Practice dating by chatting with an AI virtual date partner in high-fidelity custom settings. Build your social safety confidence!",
+                                color = Color.Gray,
+                                fontSize = 11.sp
+                            )
+
+                            if (currentTier != "Premium" && currentTier != "Premium Plus" && currentTier != "Premium Pro") {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+                                        .padding(12.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "🔒 Premium Exclusive. Upgrade to Premium or Premium Plus to chat with virtual dates!",
+                                        color = Color(0xFF00E5FF),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            } else {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text("Configure Simulation Session:", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                // Partner picker
+                                Text("Partner Persona:", color = Color.Gray, fontSize = 10.sp)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    listOf("Celeste 🤖", "Arthur 🤖", "Yuki 🤖", "Ryan 🤖").forEach { name ->
+                                        val isSelected = virtualPartnerName == name
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .background(if (isSelected) TealVibrant else DarkBackground, RoundedCornerShape(10.dp))
+                                                .clickable { viewModel.selectVirtualPartner(name, virtualScenario) }
+                                                .padding(vertical = 8.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Text(name.substringBefore(" "), color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                // Scenario picker
+                                Text("Date Setting / Location Theme:", color = Color.Gray, fontSize = 10.sp)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                val scenarios = listOf(
+                                    "Charming Cafe in Paris ☕",
+                                    "Cyberpunk Rooftop in Tokyo 👾",
+                                    "Sunset Beach Malibu 🌅"
+                                )
+                                scenarios.forEach { setting ->
+                                    val isSelected = virtualScenario == setting
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp)
+                                            .background(if (isSelected) TealVibrant else DarkBackground, RoundedCornerShape(8.dp))
+                                            .clickable { viewModel.selectVirtualPartner(virtualPartnerName, setting) }
+                                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    ) {
+                                        Text(setting, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                // Chat Screen Simulator Container
+                                Text(
+                                    text = "Live Chat Simulation (${virtualPartnerName} in ${virtualScenario.substringBefore(" ")}):",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(220.dp)
+                                        .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                                        .border(1.dp, TealAccent.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
+                                        .padding(10.dp)
+                                ) {
+                                    if (virtualDateMessages.isEmpty()) {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Button(
+                                                onClick = { viewModel.resetVirtualDate() },
+                                                colors = ButtonDefaults.buttonColors(containerColor = TealVibrant)
+                                            ) {
+                                                Text("Start Simulated Session", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                    } else {
+                                        Column(modifier = Modifier.fillMaxSize()) {
+                                            // Message List Scroll
+                                            Box(modifier = Modifier.weight(1f)) {
+                                                LazyColumn(
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    reverseLayout = true,
+                                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
+                                                    items(virtualDateMessages.reversed()) { msg ->
+                                                        val isUser = msg.senderId == 1
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                                                        ) {
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .widthIn(max = 180.dp)
+                                                                    .background(
+                                                                        if (isUser) TealVibrant else DarkBackground,
+                                                                        RoundedCornerShape(
+                                                                            topStart = 12.dp,
+                                                                            topEnd = 12.dp,
+                                                                            bottomStart = if (isUser) 12.dp else 0.dp,
+                                                                            bottomEnd = if (isUser) 0.dp else 12.dp
+                                                                        )
+                                                                    )
+                                                                    .padding(8.dp)
+                                                            ) {
+                                                                Text(msg.content, color = Color.White, fontSize = 11.sp)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            Spacer(modifier = Modifier.height(6.dp))
+
+                                            if (isVirtualDateLoading) {
+                                                Text(
+                                                    text = "$virtualPartnerName is typing standard safety advice...",
+                                                    color = TealAccent,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(bottom = 4.dp)
+                                                )
+                                            }
+
+                                            // Input row
+                                            var inputText by remember { mutableStateOf("") }
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                TextField(
+                                                    value = inputText,
+                                                    onValueChange = { inputText = it },
+                                                    placeholder = { Text("Type reply...", fontSize = 11.sp, color = Color.Gray) },
+                                                    modifier = Modifier
+                                                        .weight(1f)
+                                                        .height(42.dp),
+                                                    colors = TextFieldDefaults.colors(
+                                                        focusedContainerColor = DarkSurface,
+                                                        unfocusedContainerColor = DarkSurface,
+                                                        focusedTextColor = Color.White,
+                                                        unfocusedTextColor = Color.White,
+                                                        focusedIndicatorColor = Color.Transparent,
+                                                        unfocusedIndicatorColor = Color.Transparent
+                                                    ),
+                                                    shape = RoundedCornerShape(21.dp),
+                                                    singleLine = true
+                                                )
+
+                                                Spacer(modifier = Modifier.width(6.dp))
+
+                                                IconButton(
+                                                    onClick = {
+                                                        if (inputText.isNotBlank()) {
+                                                            viewModel.sendVirtualDateMessage(inputText)
+                                                            inputText = ""
+                                                        }
+                                                    },
+                                                    modifier = Modifier
+                                                        .size(36.dp)
+                                                        .background(TealVibrant, CircleShape)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.AutoMirrored.Filled.Send,
+                                                        contentDescription = "Send Message",
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                TextButton(
+                                    onClick = { viewModel.resetVirtualDate() },
+                                    modifier = Modifier.align(Alignment.End)
+                                ) {
+                                    Text("Reset Date Simulation", color = Color.Red, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (activePaymentPlan != null) {
+        UPIPaymentDialog(
+            planName = activePaymentPlan!!,
+            viewModel = viewModel,
+            onDismiss = { activePaymentPlan = null }
         )
     }
 }
@@ -6381,6 +9148,128 @@ fun ProfileIntegrityScannerDialog(
     )
 }
 
+// --- Verified Badge System ---
+@Composable
+fun VerifiedBadge(
+    profile: Profile,
+    modifier: Modifier = Modifier,
+    iconSize: androidx.compose.ui.unit.Dp = 14.dp,
+    textSize: androidx.compose.ui.unit.TextUnit = 10.sp,
+    showText: Boolean = true,
+    interactive: Boolean = true
+) {
+    var showExplanationDialog by remember { mutableStateOf(false) }
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(
+                if (profile.isVerified) TealAccent.copy(alpha = 0.15f) else Color.White.copy(alpha = 0.05f)
+            )
+            .border(
+                1.dp,
+                if (profile.isVerified) TealAccent.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.1f),
+                RoundedCornerShape(12.dp)
+            )
+            .clickable(enabled = interactive) {
+                showExplanationDialog = true
+            }
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = if (profile.isVerified) Icons.Default.CheckCircle else Icons.Default.Warning,
+                contentDescription = if (profile.isVerified) "AI Verified Profile" else "Unverified Profile",
+                tint = if (profile.isVerified) TealAccent else Color.LightGray,
+                modifier = Modifier.size(iconSize)
+            )
+            if (showText) {
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = if (profile.isVerified) "AI VERIFIED" else "UNVERIFIED",
+                    color = if (profile.isVerified) TealAccent else Color.LightGray,
+                    fontSize = textSize,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.5.sp
+                )
+            }
+        }
+    }
+
+    if (showExplanationDialog) {
+        AlertDialog(
+            onDismissRequest = { showExplanationDialog = false },
+            icon = {
+                Icon(
+                    imageVector = if (profile.isVerified) Icons.Default.CheckCircle else Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = if (profile.isVerified) TealAccent else Color.Red,
+                    modifier = Modifier.size(40.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = if (profile.isVerified) "AI Safety Verified" else "Profile Unverified",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    textAlign = TextAlign.Center
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    if (profile.isVerified) {
+                        Text(
+                            text = "This profile has successfully passed our AI-powered safety check for authenticity. Our deep learning models analyzed facial biometrics, verified photo liveness, and audited natural conversation structures to guarantee genuine identity.",
+                            color = Color.LightGray,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .background(TealAccent.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                                .padding(8.dp)
+                        ) {
+                            Icon(Icons.Default.Star, "Score", tint = TealAccent, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                "Safety Integrity: ${profile.trustScore}%",
+                                color = TealAccent,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.sp
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = "This profile has not undergone complete AI authenticity verification yet. You can tap the 'AI Audit' shield on their card to perform an on-demand security scan.",
+                            color = Color.LightGray,
+                            fontSize = 13.sp,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showExplanationDialog = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = TealVibrant)
+                ) {
+                    Text("Got It")
+                }
+            },
+            containerColor = DarkSurface
+        )
+    }
+}
+
 // 5. Secure Dating Educational Advisory Tip Guide Carousel
 @Composable
 fun SecuritySafetyGuideCarousel() {
@@ -6785,6 +9674,546 @@ fun AISupportChatPanel(
                                 tint = Color.White,
                                 modifier = Modifier.size(18.dp)
                             )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PhotoUploadStudioDialog(
+    slotNum: Int,
+    currentUrl: String,
+    onDismiss: () -> Unit,
+    onPhotoSelected: (String) -> Unit,
+    viewModel: DatingViewModel
+) {
+    var selectedUrl by remember { mutableStateOf(currentUrl) }
+    var customUrlInput by remember { mutableStateOf(currentUrl) }
+    var activeStudioTab by remember { mutableStateOf("Presets") } // "Presets", "Import", "GallerySim"
+    var selectedCategory by remember { mutableStateOf("Masculine") } // "Masculine", "Feminine", "Lifestyle"
+    
+    // Gallery Simulation States
+    var showGalleryProgress by remember { mutableStateOf(false) }
+    var progressStatus by remember { mutableStateOf("") }
+    var progressPercentage by remember { mutableStateOf(0f) }
+
+    val coroutineScope = rememberCoroutineScope()
+
+    val masculinePresets = listOf(
+        "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=800&q=80" to "Urban Traveler (HQ)",
+        "https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=800&q=80" to "Smiley Casual (HQ)",
+        "https://images.unsplash.com/photo-1519085360753-af0119f7cbe7?w=800&q=80" to "Adventure Hiking (HQ)",
+        "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=800&q=80" to "Neon Portrait (HQ)",
+        "https://images.unsplash.com/photo-1512485694743-9c9538b4e6e0?w=800&q=80" to "Coffee Shop Reading (HQ)"
+    )
+
+    val femininePresets = listOf(
+        "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=800&q=80" to "Sunkissed Smile (HQ)",
+        "https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=800&q=80" to "Fashion Portrait (HQ)",
+        "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=800&q=80" to "Creative Studio (HQ)",
+        "https://images.unsplash.com/photo-1517841905240-472988babdf9?w=800&q=80" to "Scenic Outdoors (HQ)",
+        "https://images.unsplash.com/photo-1508214751196-bcfd4ca60f91?w=800&q=80" to "Aesthetic Interior (HQ)"
+    )
+
+    val lifestylePresets = listOf(
+        "https://images.unsplash.com/photo-1511920170033-f8396924c348?w=800&q=80" to "Cozy Coffee Brewing",
+        "https://images.unsplash.com/photo-1550745165-9bc0b252726f?w=800&q=80" to "Cyberpunk Battlestation",
+        "https://images.unsplash.com/photo-1448375240586-882707db888b?w=800&q=80" to "Misty Forest Trail",
+        "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=800&q=80" to "Malibu Golden Sunset",
+        "https://images.unsplash.com/photo-1513364776144-60967b0f800f?w=800&q=80" to "Handmade Ceramic Pottery"
+    )
+
+    val simulatedGalleryFiles = listOf(
+        Triple("https://images.unsplash.com/photo-1501196354995-cbb51c65aaea?w=800&q=80", "DSC_8941_PORTRAIT_RAW.dng", "Sony α7R V • 85mm f/1.4 • 61MP • 14.8 MB"),
+        Triple("https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=800&q=80", "IMG_4922_RETOUCHED.tiff", "Fujifilm GFX 100S • 110mm f/2 • 102MP • 32.1 MB"),
+        Triple("https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=800&q=80", "CANDID_CAFE_PRO.jpeg", "Leica M11 • 50mm f/0.95 • 60MP • 8.4 MB"),
+        Triple("https://images.unsplash.com/photo-1501386761578-eac5c94b800a?w=800&q=80", "OUTDOORSY_SUNSET.jpg", "Canon EOS R3 • 24-70mm f/2.8 • 24MP • 4.2 MB")
+    )
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.95f)
+                .fillMaxHeight(0.85f)
+                .clip(RoundedCornerShape(24.dp))
+                .border(1.dp, Color(0xFFFFD700).copy(alpha = 0.4f), RoundedCornerShape(24.dp)),
+            color = DarkSurface
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp)
+            ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFFFD700).copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Star,
+                                contentDescription = "Premium Studio",
+                                tint = Color(0xFFFFD700),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "👑 PREMIUM PHOTO STUDIO",
+                                color = Color.White,
+                                fontWeight = FontWeight.Black,
+                                fontSize = 15.sp,
+                                letterSpacing = 0.5.sp
+                            )
+                            Text(
+                                text = "High-Quality Lossless Upload & Preset Studio (Slot $slotNum)",
+                                color = Color.Gray,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = Color.Gray,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                Divider(color = NavyLight.copy(alpha = 0.3f))
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Studio Tabs Selection Row
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(NavyDark.copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    val tabs = listOf(
+                        "Presets" to "🌟 Studio Presets",
+                        "Import" to "🔗 Custom URL",
+                        "GallerySim" to "📱 Device Gallery"
+                    )
+                    tabs.forEach { (tabKey, label) ->
+                        val isSelected = activeStudioTab == tabKey
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (isSelected) TealAccent.copy(alpha = 0.15f) else Color.Transparent)
+                                .border(
+                                    width = 1.dp,
+                                    color = if (isSelected) TealAccent.copy(alpha = 0.4f) else Color.Transparent,
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                                .clickable { activeStudioTab = tabKey }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = label,
+                                color = if (isSelected) TealAccent else Color.Gray,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 10.sp
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Main body column
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) {
+                    if (showGalleryProgress) {
+                        // Simulated Upload Pipeline Loader
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            CircularProgressIndicator(
+                                color = TealAccent,
+                                modifier = Modifier.size(48.dp)
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = progressStatus,
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            
+                            // Progress bar
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(0.7f)
+                                    .height(6.dp)
+                                    .background(NavyDark, RoundedCornerShape(3.dp))
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(progressPercentage)
+                                        .height(6.dp)
+                                        .background(
+                                            Brush.horizontalGradient(listOf(TealAccent, Color(0xFFFFD700))),
+                                            RoundedCornerShape(3.dp)
+                                        )
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "${(progressPercentage * 100).toInt()}% uploaded",
+                                color = Color.Gray,
+                                fontSize = 10.sp
+                            )
+                        }
+                    } else {
+                        when (activeStudioTab) {
+                            "Presets" -> {
+                                Column(modifier = Modifier.fillMaxSize()) {
+                                    // Categories picker (Masculine / Feminine / Lifestyle)
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        listOf("Masculine" to "👨 Masculine", "Feminine" to "👩 Feminine", "Lifestyle" to "☕ Lifestyle").forEach { (catKey, label) ->
+                                            val isSelected = selectedCategory == catKey
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .clip(RoundedCornerShape(10.dp))
+                                                    .background(if (isSelected) NavyLight else DarkBackground)
+                                                    .border(
+                                                        width = 1.dp,
+                                                        color = if (isSelected) TealAccent else Color.Transparent,
+                                                        shape = RoundedCornerShape(10.dp)
+                                                    )
+                                                    .clickable { selectedCategory = catKey }
+                                                    .padding(vertical = 6.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(label, color = if (isSelected) Color.White else Color.Gray, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(12.dp))
+
+                                    // Presets Scrollable Grid
+                                    val activePresets = when (selectedCategory) {
+                                        "Masculine" -> masculinePresets
+                                        "Feminine" -> femininePresets
+                                        else -> lifestylePresets
+                                    }
+
+                                    LazyColumn(
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        items(activePresets.size) { index ->
+                                            val (url, title) = activePresets[index]
+                                            val isSelected = selectedUrl == url
+                                            Card(
+                                                colors = CardDefaults.cardColors(
+                                                    containerColor = if (isSelected) NavyLight else DarkBackground
+                                                ),
+                                                shape = RoundedCornerShape(12.dp),
+                                                border = BorderStroke(
+                                                    width = 1.dp,
+                                                    color = if (isSelected) Color(0xFFFFD700) else Color.Transparent
+                                                ),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable { selectedUrl = url }
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(8.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    AsyncImage(
+                                                        model = url,
+                                                        contentDescription = title,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier
+                                                            .size(50.dp)
+                                                            .clip(RoundedCornerShape(8.dp))
+                                                    )
+                                                    Spacer(modifier = Modifier.width(12.dp))
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                                        Text("Ultra high-resolution photorealistic portrait", color = Color.Gray, fontSize = 10.sp)
+                                                    }
+                                                    if (isSelected) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Check,
+                                                            contentDescription = "Selected",
+                                                            tint = Color(0xFFFFD700),
+                                                            modifier = Modifier.size(20.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            "Import" -> {
+                                Column(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Text(
+                                        text = "Paste or type any premium, high-resolution direct image URL (from Unsplash, Pexels, Imgur, or your custom domain):",
+                                        color = Color.LightGray,
+                                        fontSize = 11.sp
+                                    )
+
+                                    OutlinedTextField(
+                                        value = customUrlInput,
+                                        onValueChange = {
+                                            customUrlInput = it
+                                            selectedUrl = it
+                                        },
+                                        label = { Text("High-Quality Photo URL", color = TealAccent) },
+                                        placeholder = { Text("https://example.com/photo.jpg", color = Color.DarkGray) },
+                                        singleLine = true,
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = TealAccent,
+                                            unfocusedBorderColor = Color.DarkGray,
+                                            focusedTextColor = Color.White,
+                                            unfocusedTextColor = Color.White
+                                        ),
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Button(
+                                            onClick = {
+                                                customUrlInput = ""
+                                                selectedUrl = ""
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = DarkBackground),
+                                            shape = RoundedCornerShape(8.dp)
+                                        ) {
+                                            Text("Clear", color = Color.Gray, fontSize = 10.sp)
+                                        }
+
+                                        Button(
+                                            onClick = {
+                                                selectedUrl = customUrlInput
+                                                viewModel.showNotification("⚡ Preview refreshed for custom photo link!")
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = TealVibrant),
+                                            shape = RoundedCornerShape(8.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("Refresh Photo Preview", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+
+                                    // Quick help options
+                                    Card(
+                                        colors = CardDefaults.cardColors(containerColor = NavyDark.copy(alpha = 0.5f)),
+                                        shape = RoundedCornerShape(12.dp)
+                                    ) {
+                                        Column(modifier = Modifier.padding(12.dp)) {
+                                            Text("💡 Recommendation for Ultimate Match Visibility:", color = Color(0xFFFFD700), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                "Dating profiles using high-definition (HD, portrait ratio, clear face lighting) receive up to 10 times more high-quality direct chat requests. We support lossless JPG, PNG, WebP, and raw DNG formats.",
+                                                color = Color.LightGray,
+                                                fontSize = 9.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            "GallerySim" -> {
+                                Column(modifier = Modifier.fillMaxSize()) {
+                                    Text(
+                                        text = "Simulating iOS / Android Native Photo Pipeline. Select a high-fidelity image file detected on this device storage:",
+                                        color = Color.LightGray,
+                                        fontSize = 11.sp
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+
+                                    LazyColumn(
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        items(simulatedGalleryFiles.size) { index ->
+                                            val (url, filename, specs) = simulatedGalleryFiles[index]
+                                            val isSelected = selectedUrl == url
+                                            Card(
+                                                colors = CardDefaults.cardColors(
+                                                    containerColor = if (isSelected) NavyLight else DarkBackground
+                                                ),
+                                                shape = RoundedCornerShape(12.dp),
+                                                border = BorderStroke(
+                                                    width = 1.dp,
+                                                    color = if (isSelected) TealAccent else Color.Transparent
+                                                ),
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clickable {
+                                                        showGalleryProgress = true
+                                                        progressStatus = "Verifying Image Integrity..."
+                                                        progressPercentage = 0.1f
+                                                        
+                                                        coroutineScope.launch {
+                                                            delay(500)
+                                                            progressStatus = "Running EXIF Color Profile Scan (Rec. 2020)..."
+                                                            progressPercentage = 0.4f
+                                                            delay(600)
+                                                            progressStatus = "Uploading lossless stream via E2EE Secure Sockets..."
+                                                            progressPercentage = 0.8f
+                                                            delay(700)
+                                                            progressStatus = "Rendering HDR premium thumbnail..."
+                                                            progressPercentage = 1.0f
+                                                            delay(400)
+                                                            selectedUrl = url
+                                                            showGalleryProgress = false
+                                                            viewModel.showNotification("🎉 File '$filename' uploaded successfully in ultra-high resolution!")
+                                                        }
+                                                    }
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(8.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    AsyncImage(
+                                                        model = url,
+                                                        contentDescription = filename,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier
+                                                            .size(44.dp)
+                                                            .clip(RoundedCornerShape(8.dp))
+                                                    )
+                                                    Spacer(modifier = Modifier.width(12.dp))
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(filename, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                                        Text(specs, color = Color.Gray, fontSize = 9.sp)
+                                                    }
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .background(Color(0xFFFFD700).copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                                    ) {
+                                                        Text("RAW", color = Color(0xFFFFD700), fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Bottom Panel showing Active Selection Preview and Apply actions
+                if (!showGalleryProgress) {
+                    Divider(color = NavyLight.copy(alpha = 0.3f))
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(NavyDark.copy(alpha = 0.4f), RoundedCornerShape(14.dp))
+                            .padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(54.dp)
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(DarkBackground)
+                                .border(1.dp, TealAccent, RoundedCornerShape(10.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (selectedUrl.isBlank()) {
+                                Icon(Icons.Default.Add, contentDescription = "Empty", tint = Color.Gray)
+                            } else {
+                                AsyncImage(
+                                    model = selectedUrl,
+                                    contentDescription = "Active Selection Preview",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Active Studio Choice", color = Color.Gray, fontSize = 10.sp)
+                            Text(
+                                text = if (selectedUrl.isBlank()) "No image selected" else "High-Quality Lossless Render Selected",
+                                color = if (selectedUrl.isBlank()) Color.Gray else TealAccent,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp
+                            )
+                            if (selectedUrl.isNotBlank()) {
+                                Text(
+                                    text = selectedUrl,
+                                    color = Color.Gray,
+                                    fontSize = 8.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Button(
+                            onClick = {
+                                if (selectedUrl.isNotBlank()) {
+                                    onPhotoSelected(selectedUrl)
+                                } else {
+                                    viewModel.showNotification("⚠️ Please pick or input an image URL first!")
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFFFD700)),
+                            shape = RoundedCornerShape(10.dp),
+                            enabled = selectedUrl.isNotBlank(),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text("Apply", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                         }
                     }
                 }

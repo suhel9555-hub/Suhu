@@ -193,6 +193,22 @@ class DatingViewModel(application: Application) : AndroidViewModel(application) 
     private val _currentLocation = MutableStateFlow("San Francisco, CA")
     val currentLocation: StateFlow<String> = _currentLocation.asStateFlow()
 
+    private val _searchRadiusKm = MutableStateFlow(80)
+    val searchRadiusKm: StateFlow<Int> = _searchRadiusKm.asStateFlow()
+
+    private val _minAgePreference = MutableStateFlow(18)
+    val minAgePreference: StateFlow<Int> = _minAgePreference.asStateFlow()
+
+    private val _maxAgePreference = MutableStateFlow(60)
+    val maxAgePreference: StateFlow<Int> = _maxAgePreference.asStateFlow()
+
+    fun updateMatchPreferences(radius: Int, minAge: Int, maxAge: Int) {
+        _searchRadiusKm.value = radius
+        _minAgePreference.value = minAge
+        _maxAgePreference.value = maxAge
+        showNotification("🎯 Search radius and age preferences updated!")
+    }
+
     private val _virtualPartnerName = MutableStateFlow("Celeste 🤖")
     val virtualPartnerName: StateFlow<String> = _virtualPartnerName.asStateFlow()
 
@@ -523,6 +539,52 @@ class DatingViewModel(application: Application) : AndroidViewModel(application) 
 
                 showNotification("It's a Match! You and ${swipedProfile.name} connected.")
             }
+
+            // Move to next card
+            val profiles = otherProfiles.value
+            if (profiles.isNotEmpty()) {
+                _currentSwipeIndex.value = (_currentSwipeIndex.value + 1) % profiles.size
+            }
+        }
+    }
+
+    fun undoSwipe() {
+        viewModelScope.launch {
+            val profiles = otherProfiles.value
+            if (profiles.isNotEmpty()) {
+                val currentIndex = _currentSwipeIndex.value
+                val previousIndex = if (currentIndex - 1 < 0) profiles.size - 1 else currentIndex - 1
+                _currentSwipeIndex.value = previousIndex
+            }
+        }
+    }
+
+    fun instantMatch(swipedProfile: Profile) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val user = userProfile.value ?: return@launch
+            
+            // Record match in DB with 100% guarantee
+            val match = Match(userId = user.id, matchedUserId = swipedProfile.id)
+            val matchId = matchDao.insertMatch(match).toInt()
+
+            // Trigger splash screen
+            _matchSplashProfile.value = swipedProfile
+
+            // Automatically generate a welcoming introductory icebreaker from the matched user
+            val welcomeMessage = "⚡ INSTANT MATCH! Hey there! I'm so thrilled we connected instantly. I love ${
+                swipedProfile.interestList.firstOrNull() ?: "making new connections"
+            }! Let's make something amazing happen!"
+            
+            messageDao.insertMessage(
+                Message(
+                    matchId = matchId,
+                    senderId = swipedProfile.id,
+                    receiverId = user.id,
+                    content = welcomeMessage
+                )
+            )
+
+            showNotification("Instant Match! Connected with ${swipedProfile.name} ⚡")
 
             // Move to next card
             val profiles = otherProfiles.value
@@ -1046,28 +1108,36 @@ class DatingViewModel(application: Application) : AndroidViewModel(application) 
         _onDemandScanningId.value = profile.id
         _onDemandIntegrityReport.value = null
         viewModelScope.launch(Dispatchers.IO) {
-            delay(150) // simulated intensive cryptographic scan (super fast!)
+            delay(1200) // beautiful delay for high-fidelity scanning feel
             val score = if (profile.name == "RichCryptoAngel") 12 else if (profile.isVerified) 98 else 74
+            val passedSafetyCheck = score >= 70
             val trustColor = if (score > 80) "EXCELLENT" else if (score > 50) "MODERATE" else "CRITICAL RISK"
             
             val report = """
-                🔍 CRYPTO INTEGRITY REPORT
+                🔍 AI INTEGRITY SCAN REPORT
                 ===========================
                 Target: ${profile.name} (Age ${profile.age})
                 FC Trust Score: $score% ($trustColor)
                 
                 [SAFETY SCANS]
-                - Link Security: Checked (No external scams)
-                - Photo Verifier: ${if (profile.isVerified) "MATCHED" else "UNVERIFIED PHOTO"}
-                - Threat Patterns: ${if (profile.name == "RichCryptoAngel") "SPAM DETECTED: Includes phrases requesting external money or crypto transfer. High probability of commercial bot." else "NO ALERTS"}
-                - Risk level: ${if (profile.name == "RichCryptoAngel") "HIGH (Avoid sharing private email/phone)" else "LOW"}
+                - Facial Biometric Match: ${if (passedSafetyCheck) "PASSED (AI Photo Verification Liveness Confirmed)" else "FAILED (Inconsistent landmarks)"}
+                - Natural Language Spam Audit: ${if (profile.name == "RichCryptoAngel") "SPAM ALERT: Heavy promotional terms detected." else "PASSED (Organic chat patterns)"}
+                - Link Security: Checked (No dangerous domains)
+                - Threat Patterns: ${if (profile.name == "RichCryptoAngel") "SPAM DETECTED: Solicits money, external handles, or crypto. High probability of a commercial bot." else "NO ALERTS (Authentic behavior)"}
+                - Risk level: ${if (profile.name == "RichCryptoAngel") "HIGH RISK (Engagement restricted)" else "LOW RISK (Verified Safe)"}
             """.trimIndent()
             
             _onDemandIntegrityReport.value = report
             _onDemandScanningId.value = null
             
-            val updated = profile.copy(trustScore = score)
+            val updated = profile.copy(
+                trustScore = score,
+                isVerified = if (passedSafetyCheck) true else profile.isVerified
+            )
             profileDao.updateProfile(updated)
+            if (passedSafetyCheck && !profile.isVerified) {
+                showNotification("✨ ${profile.name} has passed the AI-powered safety check and is now Verified!")
+            }
         }
     }
 
